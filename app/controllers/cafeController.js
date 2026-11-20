@@ -1,6 +1,7 @@
 const mongoose = require("mongoose");
 const Cafe = require("../models/Cafe");
 const Reward = require("../models/Reward");
+const User = require("../models/User");
 
 /**
  * Helper to resolve cafe for current authenticated user
@@ -392,9 +393,625 @@ const updateMyCafeProfile = async (req, res) => {
   }
 };
 
+/**
+ * @desc    Join a cafe loyalty program
+ * @route   POST /api/cafes/:cafeId/join
+ * @access  Protected
+ */
+const joinCafe = async (req, res) => {
+  try {
+    const user = await User.findById(req.user._id);
+    if (!user) {
+      return res.status(404).json({ success: false, message: "User not found." });
+    }
+
+    const { cafeId } = req.params;
+
+    // Support lookup by ObjectId or slug
+    const query = mongoose.isValidObjectId(cafeId)
+      ? { $or: [{ _id: cafeId }, { slug: cafeId.toLowerCase() }] }
+      : { slug: cafeId.toLowerCase() };
+
+    const cafe = await Cafe.findOne(query);
+    if (!cafe) {
+      return res.status(404).json({
+        success: false,
+        message: `Cafe '${cafeId}' not found.`,
+      });
+    }
+
+    if (!Array.isArray(user.cafes)) user.cafes = [];
+    if (!Array.isArray(cafe.customers)) cafe.customers = [];
+
+    // Check if user already joined this cafe
+    const existingUserIndex = user.cafes.findIndex(
+      (c) => c.cafeId && c.cafeId.toString() === cafe._id.toString()
+    );
+
+    const existingCafeCustomerIndex = cafe.customers.findIndex(
+      (c) => c.userId && c.userId.toString() === user._id.toString()
+    );
+
+    let userMembership;
+
+    if (existingUserIndex >= 0) {
+      userMembership = user.cafes[existingUserIndex];
+    } else {
+      userMembership = {
+        cafeId: cafe._id,
+        joinedAt: new Date(),
+        stamps: 1,
+        totalVisits: 1,
+        lifetimeStamps: 1,
+        rewardsRedeemedCount: 0,
+        lastVisitDate: new Date(),
+      };
+      user.cafes.push(userMembership);
+      user.joinedCafes = user.cafes.length;
+      user.totalStamps = (user.totalStamps || 0) + 1;
+      await user.save();
+    }
+
+    // Add to cafe's customers array if not already present
+    if (existingCafeCustomerIndex < 0) {
+      cafe.customers.push({
+        userId: user._id,
+        joinedAt: new Date(),
+        stamps: userMembership.stamps || 1,
+        totalVisits: 1,
+        lifetimeStamps: 1,
+        rewardsRedeemedCount: 0,
+        lastVisitDate: new Date(),
+        status: "active",
+      });
+      cafe.customerCount = cafe.customers.length;
+      cafe.totalStampsIssued = (cafe.totalStampsIssued || 0) + 1;
+      await cafe.save();
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: `Successfully joined ${cafe.name} loyalty program!`,
+      data: {
+        cafeId: cafe._id.toString(),
+        cafeSlug: cafe.slug,
+        cafeName: cafe.name,
+        membership: {
+          cafeId: cafe._id.toString(),
+          cafeSlug: cafe.slug,
+          cafeName: cafe.name,
+          joinedAt: userMembership.joinedAt,
+          stamps: userMembership.stamps || 0,
+          totalStamps: cafe.stampTarget || 10,
+          totalVisits: userMembership.totalVisits || 0,
+          lifetimeStamps: userMembership.lifetimeStamps || 0,
+          lastVisitDate: userMembership.lastVisitDate,
+        },
+      },
+    });
+  } catch (error) {
+    console.error("[Cafe Controller] joinCafe error:", error);
+    return res.status(500).json({
+      success: false,
+      message: error.message || "Server error joining cafe.",
+    });
+  }
+};
+
+/**
+ * @desc    Leave a cafe loyalty program
+ * @route   POST /api/cafes/:cafeId/leave
+ * @access  Protected
+ */
+const leaveCafe = async (req, res) => {
+  try {
+    const user = await User.findById(req.user._id);
+    if (!user) {
+      return res.status(404).json({ success: false, message: "User not found." });
+    }
+
+    const { cafeId } = req.params;
+
+    const query = mongoose.isValidObjectId(cafeId)
+      ? { $or: [{ _id: cafeId }, { slug: cafeId.toLowerCase() }] }
+      : { slug: cafeId.toLowerCase() };
+
+    const cafe = await Cafe.findOne(query);
+    if (!cafe) {
+      return res.status(404).json({
+        success: false,
+        message: `Cafe '${cafeId}' not found.`,
+      });
+    }
+
+    // Remove from user's cafes array
+    if (Array.isArray(user.cafes)) {
+      user.cafes = user.cafes.filter(
+        (c) => c.cafeId && c.cafeId.toString() !== cafe._id.toString()
+      );
+      user.joinedCafes = user.cafes.length;
+      await user.save();
+    }
+
+    // Remove from cafe's customers array
+    if (Array.isArray(cafe.customers)) {
+      cafe.customers = cafe.customers.filter(
+        (c) => c.userId && c.userId.toString() !== user._id.toString()
+      );
+      cafe.customerCount = cafe.customers.length;
+      await cafe.save();
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: `Successfully left ${cafe.name} loyalty program.`,
+      data: {
+        cafeId: cafe._id.toString(),
+        cafeSlug: cafe.slug,
+      },
+    });
+  } catch (error) {
+    console.error("[Cafe Controller] leaveCafe error:", error);
+    return res.status(500).json({
+      success: false,
+      message: error.message || "Server error leaving cafe.",
+    });
+  }
+};
+
+/**
+ * @desc    Get user's joined cafe memberships
+ * @route   GET /api/cafes/my/memberships
+ * @access  Protected
+ */
+const getMyMemberships = async (req, res) => {
+  try {
+    const user = await User.findById(req.user._id).populate({
+      path: "cafes.cafeId",
+      select: "name slug tagline logoImage coverImage stampTarget status isActive category location rewards",
+    });
+
+    if (!user) {
+      return res.status(404).json({ success: false, message: "User not found" });
+    }
+
+    const memberships = (user.cafes || [])
+      .filter((c) => c.cafeId) // Filter out deleted cafes
+      .map((c) => ({
+        cafeId: c.cafeId._id.toString(),
+        cafeSlug: c.cafeId.slug,
+        cafeName: c.cafeId.name,
+        cafeLogo: c.cafeId.logoImage,
+        cafeCover: c.cafeId.coverImage,
+        category: c.cafeId.category,
+        totalStamps: c.cafeId.stampTarget || 10,
+        stamps: c.stamps || 0,
+        totalVisits: c.totalVisits || 0,
+        lifetimeStamps: c.lifetimeStamps || 0,
+        rewardsRedeemedCount: c.rewardsRedeemedCount || 0,
+        joinedAt: c.joinedAt,
+        lastVisitDate: c.lastVisitDate,
+      }));
+
+    return res.status(200).json({
+      success: true,
+      count: memberships.length,
+      data: {
+        memberships,
+      },
+    });
+  } catch (error) {
+    console.error("[Cafe Controller] getMyMemberships error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Server error fetching memberships.",
+    });
+  }
+};
+
+/**
+ * @desc    Get real customers joined to this cafe for staff/owner dashboard
+ * @route   GET /api/dashboard/cafe/customers
+ * @access  Protected (cafeOwner, cafeManager, cafeBarista, admin)
+ */
+const getCafeCustomers = async (req, res) => {
+  try {
+    const cafe = await resolveUserCafe(req.user, req.query.cafeId);
+
+    if (!cafe) {
+      return res.status(404).json({
+        success: false,
+        message: "No cafe found associated with your account.",
+      });
+    }
+
+    // Fetch cafe with populated customers.userId
+    const populatedCafe = await Cafe.findById(cafe._id).populate({
+      path: "customers.userId",
+      select: "name email phone avatar qrCode createdAt isActive",
+    });
+
+    const customers = (populatedCafe.customers || [])
+      .filter((c) => c.userId) // filter out deleted users
+      .map((c) => {
+        const u = c.userId;
+        const memberCode = u.qrCode
+          ? (u.qrCode.length > 12 ? `STAMPY-${u.qrCode.slice(0, 8).toUpperCase()}` : u.qrCode)
+          : `STAMPY-${u._id.toString().slice(-4).toUpperCase()}`;
+
+        return {
+          id: u._id.toString(),
+          userId: u._id.toString(),
+          code: memberCode,
+          name: u.name,
+          email: u.email,
+          phone: u.phone || "No phone provided",
+          avatar:
+            u.avatar ||
+            "https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&w=200&q=80",
+          stamps: c.stamps || 0,
+          totalStamps: cafe.stampTarget || 10,
+          lifetimeStamps: c.lifetimeStamps || c.stamps || 0,
+          totalVisits: c.totalVisits || 0,
+          rewardsRedeemedCount: c.rewardsRedeemedCount || 0,
+          status: c.status || (u.isActive ? "active" : "inactive"),
+          registeredDate: c.joinedAt
+            ? new Date(c.joinedAt).toISOString().split("T")[0]
+            : new Date(u.createdAt).toISOString().split("T")[0],
+          lastVisitDate: c.lastVisitDate
+            ? new Date(c.lastVisitDate).toISOString().split("T")[0]
+            : null,
+          favoriteItem: c.favoriteItem || "Loyalty Member",
+          notes: c.notes || "",
+        };
+      });
+
+    return res.status(200).json({
+      success: true,
+      count: customers.length,
+      data: {
+        customers,
+      },
+    });
+  } catch (error) {
+    console.error("[Cafe Controller] getCafeCustomers error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Server error fetching cafe customers.",
+    });
+  }
+};
+
+/**
+ * @desc    Manually adjust customer stamps from cafe dashboard
+ * @route   PATCH /api/dashboard/cafe/customers/:customerId/stamps
+ * @access  Protected (cafeOwner, cafeManager, admin)
+ */
+const updateCafeCustomerStamps = async (req, res) => {
+  try {
+    const cafe = await resolveUserCafe(req.user, req.query.cafeId);
+    if (!cafe) {
+      return res.status(404).json({ success: false, message: "Cafe not found." });
+    }
+
+    const { customerId } = req.params;
+    const { stamps, lifetimeStamps, reason } = req.body;
+
+    // Update in cafe.customers
+    const customerEntry = (cafe.customers || []).find(
+      (c) => c.userId && c.userId.toString() === customerId
+    );
+
+    if (!customerEntry) {
+      return res.status(404).json({
+        success: false,
+        message: "Customer is not enrolled in this cafe.",
+      });
+    }
+
+    if (stamps !== undefined) customerEntry.stamps = Math.max(0, Number(stamps));
+    if (lifetimeStamps !== undefined) {
+      customerEntry.lifetimeStamps = Math.max(0, Number(lifetimeStamps));
+    }
+    if (reason) {
+      customerEntry.notes = `${customerEntry.notes ? customerEntry.notes + " | " : ""}${reason}`;
+    }
+
+    await cafe.save();
+
+    // Also update in user.cafes
+    const user = await User.findById(customerId);
+    if (user && Array.isArray(user.cafes)) {
+      const userCafeEntry = user.cafes.find(
+        (c) => c.cafeId && c.cafeId.toString() === cafe._id.toString()
+      );
+      if (userCafeEntry) {
+        if (stamps !== undefined) userCafeEntry.stamps = Math.max(0, Number(stamps));
+        if (lifetimeStamps !== undefined) {
+          userCafeEntry.lifetimeStamps = Math.max(0, Number(lifetimeStamps));
+        }
+        await user.save();
+      }
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: "Customer stamps updated.",
+      data: {
+        customerId,
+        stamps: customerEntry.stamps,
+        lifetimeStamps: customerEntry.lifetimeStamps,
+      },
+    });
+  } catch (error) {
+    console.error("[Cafe Controller] updateCafeCustomerStamps error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Server error updating customer stamps.",
+    });
+  }
+};
+
+/**
+ * @desc    Verify and identify scanned customer QR code for the current cafe
+ * @route   POST /api/dashboard/cafe/scan
+ * @access  Protected (cafeOwner, cafeManager, cafeBarista, admin)
+ */
+const scanCustomer = async (req, res) => {
+  try {
+    const { code } = req.body;
+    if (!code || typeof code !== "string" || !code.trim()) {
+      return res.status(400).json({
+        success: false,
+        message: "Please provide a customer QR code or identifier.",
+      });
+    }
+
+    const trimmedCode = code.trim();
+
+    // 1. Resolve staff's cafe
+    const staffCafe = await resolveUserCafe(req.user, req.query.cafeId);
+    if (!staffCafe) {
+      return res.status(404).json({
+        success: false,
+        message: "No cafe associated with your staff account.",
+      });
+    }
+
+    // 2. Lookup customer in User model
+    const searchConditions = [{ qrCode: trimmedCode }];
+    if (mongoose.isValidObjectId(trimmedCode)) {
+      searchConditions.push({ _id: trimmedCode });
+    }
+    if (trimmedCode.includes("@")) {
+      searchConditions.push({ email: trimmedCode.toLowerCase() });
+    }
+    searchConditions.push({ phone: trimmedCode });
+
+    let customer = await User.findOne({ $or: searchConditions });
+
+    // Fallback: check if code matches any customer in staffCafe.customers
+    if (!customer) {
+      const cafeCust = (staffCafe.customers || []).find(
+        (c) => c.userId && c.userId.toString() === trimmedCode
+      );
+      if (cafeCust) {
+        customer = await User.findById(cafeCust.userId);
+      }
+    }
+
+    if (!customer) {
+      return res.status(404).json({
+        success: false,
+        message: `No customer account found matching "${trimmedCode}".`,
+      });
+    }
+
+    // 3. Check if customer is joined to THIS cafe
+    const staffCafeIdStr = staffCafe._id.toString();
+    const userMembership = (customer.cafes || []).find(
+      (c) => c.cafeId && c.cafeId.toString() === staffCafeIdStr
+    );
+
+    const isJoined = Boolean(userMembership);
+
+    // Check today's visit
+    const todayStr = new Date().toISOString().split("T")[0];
+    const lastVisitStr = userMembership?.lastVisitDate
+      ? new Date(userMembership.lastVisitDate).toISOString().split("T")[0]
+      : null;
+    const alreadyVisitedToday = lastVisitStr === todayStr;
+
+    const formattedJoinedDate = userMembership?.joinedAt
+      ? new Date(userMembership.joinedAt).toLocaleDateString("en-US", {
+          month: "short",
+          day: "numeric",
+          year: "numeric",
+        })
+      : customer.createdAt
+      ? new Date(customer.createdAt).toLocaleDateString("en-US", {
+          month: "short",
+          day: "numeric",
+          year: "numeric",
+        })
+      : "Recently";
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        customer: {
+          id: customer._id.toString(),
+          name: customer.name,
+          email: customer.email,
+          phone: customer.phone || "",
+          avatar: customer.avatar || "",
+          qrCode: customer.qrCode || "",
+          joinedDate: formattedJoinedDate,
+          rawJoinedAt: userMembership?.joinedAt || customer.createdAt,
+        },
+        cafe: {
+          id: staffCafe._id.toString(),
+          name: staffCafe.name,
+          slug: staffCafe.slug,
+          stampTarget: staffCafe.stampTarget || 10,
+        },
+        isJoined,
+        stamps: userMembership ? userMembership.stamps || 0 : 0,
+        totalStamps: staffCafe.stampTarget || 10,
+        totalVisits: userMembership ? userMembership.totalVisits || 0 : 0,
+        lifetimeStamps: userMembership ? userMembership.lifetimeStamps || 0 : 0,
+        lastVisitDate: userMembership?.lastVisitDate || null,
+        alreadyVisitedToday,
+      },
+    });
+  } catch (error) {
+    console.error("[Cafe Controller] scanCustomer error:", error);
+    return res.status(500).json({
+      success: false,
+      message: error.message || "Server error validating QR scan.",
+    });
+  }
+};
+
+/**
+ * @desc    Award stamp(s) to a customer for current cafe after successful scan
+ * @route   POST /api/dashboard/cafe/award-stamp
+ * @access  Protected (cafeOwner, cafeManager, cafeBarista, admin)
+ */
+const awardStamp = async (req, res) => {
+  try {
+    const { customerId, stampsCount = 1, note = "" } = req.body;
+    if (!customerId) {
+      return res.status(400).json({
+        success: false,
+        message: "Customer ID is required to award stamps.",
+      });
+    }
+
+    const count = Math.max(1, Number(stampsCount) || 1);
+
+    // 1. Resolve staff's cafe
+    const staffCafe = await resolveUserCafe(req.user, req.query.cafeId);
+    if (!staffCafe) {
+      return res.status(404).json({
+        success: false,
+        message: "No cafe associated with your staff account.",
+      });
+    }
+
+    // 2. Find customer
+    const customer = await User.findById(customerId);
+    if (!customer) {
+      return res.status(404).json({
+        success: false,
+        message: "Customer not found.",
+      });
+    }
+
+    const staffCafeIdStr = staffCafe._id.toString();
+    const stampTarget = staffCafe.stampTarget || 10;
+
+    if (!Array.isArray(customer.cafes)) customer.cafes = [];
+    if (!Array.isArray(staffCafe.customers)) staffCafe.customers = [];
+
+    // Find customer's membership in user.cafes
+    let userMemIndex = customer.cafes.findIndex(
+      (c) => c.cafeId && c.cafeId.toString() === staffCafeIdStr
+    );
+
+    let userMembership;
+    const now = new Date();
+
+    if (userMemIndex >= 0) {
+      userMembership = customer.cafes[userMemIndex];
+      userMembership.stamps = (userMembership.stamps || 0) + count;
+      userMembership.lifetimeStamps = (userMembership.lifetimeStamps || 0) + count;
+      userMembership.totalVisits = (userMembership.totalVisits || 0) + 1;
+      userMembership.lastVisitDate = now;
+    } else {
+      // Auto-enroll if barista chooses to award stamp
+      userMembership = {
+        cafeId: staffCafe._id,
+        joinedAt: now,
+        stamps: count,
+        lifetimeStamps: count,
+        totalVisits: 1,
+        rewardsRedeemedCount: 0,
+        lastVisitDate: now,
+      };
+      customer.cafes.push(userMembership);
+      customer.joinedCafes = customer.cafes.length;
+    }
+
+    customer.totalStamps = (customer.totalStamps || 0) + count;
+    await customer.save();
+
+    // Update cafe.customers array
+    let cafeCustIndex = staffCafe.customers.findIndex(
+      (c) => c.userId && c.userId.toString() === customer._id.toString()
+    );
+
+    if (cafeCustIndex >= 0) {
+      const cafeCust = staffCafe.customers[cafeCustIndex];
+      cafeCust.stamps = userMembership.stamps;
+      cafeCust.lifetimeStamps = userMembership.lifetimeStamps;
+      cafeCust.totalVisits = userMembership.totalVisits;
+      cafeCust.lastVisitDate = now;
+      cafeCust.status = "active";
+    } else {
+      staffCafe.customers.push({
+        userId: customer._id,
+        joinedAt: now,
+        stamps: userMembership.stamps,
+        lifetimeStamps: userMembership.lifetimeStamps,
+        totalVisits: 1,
+        rewardsRedeemedCount: 0,
+        lastVisitDate: now,
+        status: "active",
+      });
+      staffCafe.customerCount = staffCafe.customers.length;
+    }
+
+    staffCafe.totalStampsIssued = (staffCafe.totalStampsIssued || 0) + count;
+    await staffCafe.save();
+
+    const unlockedReward = userMembership.stamps >= stampTarget;
+
+    return res.status(200).json({
+      success: true,
+      message: `Successfully awarded +${count} stamp(s) to ${customer.name}!`,
+      data: {
+        customerId: customer._id.toString(),
+        customerName: customer.name,
+        cafeId: staffCafe._id.toString(),
+        cafeName: staffCafe.name,
+        newStamps: userMembership.stamps,
+        stampTarget,
+        totalVisits: userMembership.totalVisits,
+        lifetimeStamps: userMembership.lifetimeStamps,
+        unlockedReward,
+        note,
+      },
+    });
+  } catch (error) {
+    console.error("[Cafe Controller] awardStamp error:", error);
+    return res.status(500).json({
+      success: false,
+      message: error.message || "Server error awarding stamp.",
+    });
+  }
+};
+
 module.exports = {
   getPublicCafes,
   getCafeBySlug,
   getMyCafeProfile,
   updateMyCafeProfile,
+  joinCafe,
+  leaveCafe,
+  getMyMemberships,
+  getCafeCustomers,
+  updateCafeCustomerStamps,
+  scanCustomer,
+  awardStamp,
 };

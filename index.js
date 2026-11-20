@@ -21,9 +21,13 @@ async function startServer() {
 
     const app = express();
 
+    // ── Chrome DevTools Probe ─────────────────────────────────────────────────
+    // Silently acknowledge Chrome DevTools probing to prevent CSP / 404 console warnings
+    app.get("/.well-known/appspecific/com.chrome.devtools.json", (req, res) => {
+      res.status(204).end();
+    });
+
     // ── CORS ──────────────────────────────────────────────────────────────────
-    // Allowed origins: comma-separated list from ALLOWED_ORIGINS env var,
-    // plus regex support for any localhost/127.0.0.1 port and *.vercel.app deployments.
     const customAllowedOrigins = (process.env.ALLOWED_ORIGINS || "")
       .split(",")
       .map((o) => o.trim())
@@ -60,7 +64,35 @@ async function startServer() {
     app.use(express.urlencoded({ extended: true, limit: "1mb" }));
     app.use(cookieParser());
 
-    // ── Routes ───────────────────────────────────────────────────────────────
+    // ── Health check ─────────────────────────────────────────────────────────
+    app.get("/api/health", (req, res) => {
+      res.status(200).json({
+        success: true,
+        message: "Stampy API is healthy",
+        timestamp: new Date().toISOString(),
+        port: PORT,
+      });
+    });
+
+    // ── Root info endpoint ───────────────────────────────────────────────────
+    app.get("/", (req, res) => {
+      res.status(200).json({
+        success: true,
+        name: "Stampy Backend API Server",
+        status: "online",
+        port: PORT,
+        frontendUrl: "http://localhost:3000",
+        endpoints: {
+          health: "/api/health",
+          auth: "/api/auth",
+          cafes: "/api/cafes",
+          dashboard: "/api/dashboard/cafe",
+          admin: "/api/admin/cafes",
+        },
+      });
+    });
+
+    // ── API Routes ────────────────────────────────────────────────────────────
     app.use("/api/auth", authRoutes);
     app.use("/api/announcements", announcementRoutes);
     app.use("/api/admin/cafes", adminCafeRoutes);
@@ -73,28 +105,18 @@ async function startServer() {
     app.use("/api/dashboard/cafe", dashboardCafeRoutes);
     app.use("/api/dashboard/profile", dashboardCafeRoutes);
 
-    // ── Health check ─────────────────────────────────────────────────────────
-    app.get("/api/health", (req, res) => {
-      res.status(200).json({
-        success: true,
-        message: "Stampy API is healthy",
-        timestamp: new Date().toISOString(),
-      });
-    });
-
-    // ── 404 for unmatched /api routes ─────────────────────────────────────────
-    app.use("/api", (req, res) => {
+    // ── 404 for unmatched routes ──────────────────────────────────────────────
+    app.use((req, res) => {
       res.status(404).json({
         success: false,
-        message: `API endpoint '${req.originalUrl}' not found`,
+        message: `API endpoint '${req.originalUrl}' not found on backend port ${PORT}.`,
       });
     });
 
     // ── Global error handler ──────────────────────────────────────────────────
-    // eslint-disable-next-line no-unused-vars
     app.use((err, req, res, next) => {
       console.error("[Server Error]", err);
-      return res.status(err.status || 500).json({
+      res.status(err.status || 500).json({
         success: false,
         message:
           process.env.NODE_ENV === "production"
@@ -104,7 +126,7 @@ async function startServer() {
     });
 
     app.listen(PORT, () => {
-      console.log(`[Stampy] Server running on http://localhost:${PORT}`);
+      console.log(`[Stampy] Backend API Server running on http://localhost:${PORT}`);
     });
   } catch (error) {
     console.error("[Stampy Fatal Error]:", error);

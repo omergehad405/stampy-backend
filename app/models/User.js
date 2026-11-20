@@ -52,6 +52,44 @@ const userSchema = new mongoose.Schema(
       sparse: true, // Sparse allows multiple null/undefined values for non-customers
       index: true,
     },
+    // Joined Cafes loyalty memberships (connected through Cafe ID)
+    cafes: [
+      {
+        cafeId: {
+          type: mongoose.Schema.Types.ObjectId,
+          ref: "Cafe",
+          required: true,
+        },
+        joinedAt: {
+          type: Date,
+          default: Date.now,
+        },
+        stamps: {
+          type: Number,
+          default: 0,
+          min: 0,
+        },
+        totalVisits: {
+          type: Number,
+          default: 0,
+          min: 0,
+        },
+        lifetimeStamps: {
+          type: Number,
+          default: 0,
+          min: 0,
+        },
+        rewardsRedeemedCount: {
+          type: Number,
+          default: 0,
+          min: 0,
+        },
+        lastVisitDate: {
+          type: Date,
+          default: null,
+        },
+      },
+    ],
     // Customer Loyalty Statistics (defaults to 0 on registration)
     totalStamps: {
       type: Number,

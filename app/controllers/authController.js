@@ -284,6 +284,30 @@ const getMe = async (req, res) => {
       associatedCafe = await getAssociatedCafe(user);
     }
 
+    // Populate user's joined cafes with cafe details
+    const populatedUser = await User.findById(user._id).populate({
+      path: "cafes.cafeId",
+      select: "name slug tagline logoImage coverImage stampTarget status isActive category location rewards",
+    });
+
+    const joinedCafesList = (populatedUser?.cafes || [])
+      .filter((c) => c.cafeId)
+      .map((c) => ({
+        cafeId: c.cafeId._id.toString(),
+        slug: c.cafeId.slug,
+        name: c.cafeId.name,
+        logoImage: c.cafeId.logoImage,
+        coverImage: c.cafeId.coverImage,
+        category: c.cafeId.category,
+        totalStamps: c.cafeId.stampTarget || 10,
+        stamps: c.stamps || 0,
+        totalVisits: c.totalVisits || 0,
+        lifetimeStamps: c.lifetimeStamps || 0,
+        rewardsRedeemedCount: c.rewardsRedeemedCount || 0,
+        joinedAt: c.joinedAt,
+        lastVisitDate: c.lastVisitDate,
+      }));
+
     return res.status(200).json({
       success: true,
       data: {
@@ -298,8 +322,9 @@ const getMe = async (req, res) => {
           avatar: user.avatar || "",
           totalStamps: user.totalStamps ?? 0,
           availableRewards: user.availableRewards ?? 0,
-          joinedCafes: user.joinedCafes ?? 0,
-          joinedCafesCount: user.joinedCafes ?? 0,
+          joinedCafes: joinedCafesList.length,
+          joinedCafesCount: joinedCafesList.length,
+          cafes: joinedCafesList,
           redeemedRewards: user.redeemedRewards ?? 0,
           notificationsEnabled: user.notificationsEnabled ?? true,
           biometricsEnabled: user.biometricsEnabled ?? true,

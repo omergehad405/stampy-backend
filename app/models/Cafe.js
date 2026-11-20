@@ -72,6 +72,57 @@ const cafeSchema = new mongoose.Schema(
       type: Number,
       default: 0,
     },
+    // Customers enrolled in this cafe loyalty program (connected through User ID)
+    customers: [
+      {
+        userId: {
+          type: mongoose.Schema.Types.ObjectId,
+          ref: "User",
+          required: true,
+        },
+        joinedAt: {
+          type: Date,
+          default: Date.now,
+        },
+        stamps: {
+          type: Number,
+          default: 0,
+          min: 0,
+        },
+        totalVisits: {
+          type: Number,
+          default: 0,
+          min: 0,
+        },
+        lifetimeStamps: {
+          type: Number,
+          default: 0,
+          min: 0,
+        },
+        rewardsRedeemedCount: {
+          type: Number,
+          default: 0,
+          min: 0,
+        },
+        lastVisitDate: {
+          type: Date,
+          default: null,
+        },
+        status: {
+          type: String,
+          enum: ["active", "inactive"],
+          default: "active",
+        },
+        favoriteItem: {
+          type: String,
+          default: "",
+        },
+        notes: {
+          type: String,
+          default: "",
+        },
+      },
+    ],
     totalStampsIssued: {
       type: Number,
       default: 0,
