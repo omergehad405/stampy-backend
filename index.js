@@ -1,5 +1,6 @@
 require("dotenv").config();
 const express = require("express");
+const cors = require("cors");
 const cookieParser = require("cookie-parser");
 const connectDB = require("./config/db");
 const authRoutes = require("./app/routing/authRoutes");
@@ -19,6 +20,41 @@ async function startServer() {
     await connectDB();
 
     const app = express();
+
+    // ── CORS ──────────────────────────────────────────────────────────────────
+    // Allowed origins: comma-separated list from ALLOWED_ORIGINS env var,
+    // plus regex support for any localhost/127.0.0.1 port and *.vercel.app deployments.
+    const customAllowedOrigins = (process.env.ALLOWED_ORIGINS || "")
+      .split(",")
+      .map((o) => o.trim())
+      .filter(Boolean);
+
+    const isOriginAllowed = (origin) => {
+      if (!origin) return true; // Server-to-server, curl, Postman
+      // Localhost or 127.0.0.1 on any port (e.g. :3000, :5000, :5173)
+      if (/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)) return true;
+      // Vercel deployment preview / production domains
+      if (/^https:\/\/.*\.vercel\.app$/.test(origin)) return true;
+      // Any custom origins from .env
+      if (customAllowedOrigins.includes(origin)) return true;
+      return false;
+    };
+
+    app.use(
+      cors({
+        origin(origin, callback) {
+          if (isOriginAllowed(origin)) {
+            callback(null, true);
+          } else {
+            callback(null, false);
+          }
+        },
+        credentials: true, // Required for HttpOnly cookie auth
+        methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+        allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With", "Accept"],
+        optionsSuccessStatus: 200,
+      })
+    );
 
     app.use(express.json({ limit: "1mb" }));
     app.use(express.urlencoded({ extended: true, limit: "1mb" }));
