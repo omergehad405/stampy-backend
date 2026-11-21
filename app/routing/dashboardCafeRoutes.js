@@ -6,6 +6,8 @@ const {
   updateCafeCustomerStamps,
   scanCustomer,
   awardStamp,
+  fulfillRewardRedemption,
+  getCafeActivities,
 } = require("../controllers/cafeController");
 const { protect, authorize } = require("../middlewares/authMiddleware");
 
@@ -20,5 +22,7 @@ router.get("/customers", getCafeCustomers);
 router.patch("/customers/:customerId/stamps", updateCafeCustomerStamps);
 router.post("/scan", scanCustomer);
 router.post("/award-stamp", awardStamp);
+router.post("/fulfill-redemption", fulfillRewardRedemption);
+router.get("/activities", getCafeActivities);
 
 module.exports = router;

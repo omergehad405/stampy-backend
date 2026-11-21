@@ -66,7 +66,7 @@ const sendTokenResponse = (user, statusCode, res, message = "Success", extraData
       redeemedRewards: user.redeemedRewards ?? 0,
       notificationsEnabled: user.notificationsEnabled ?? true,
       biometricsEnabled: user.biometricsEnabled ?? true,
-      ...(user.role === "user" && user.qrCode ? { qrCode: user.qrCode } : {}),
+      qrCode: user.qrCode || "",
     },
     token,
   };

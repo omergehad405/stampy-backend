@@ -165,11 +165,8 @@ const register = async (req, res) => {
       });
     }
 
-    // Customer accounts receive a permanent QR identifier
-    let qrCode;
-    if (assignedRole === "user") {
-      qrCode = await generateCustomerQrCode(User);
-    }
+    // All accounts receive a permanent unique QR identifier
+    const qrCode = await generateCustomerQrCode(User);
 
     // Create user with default 0 loyalty statistics
     const user = await User.create({
@@ -182,7 +179,7 @@ const register = async (req, res) => {
       availableRewards: 0,
       joinedCafes: 0,
       redeemedRewards: 0,
-      ...(qrCode ? { qrCode } : {}),
+      qrCode,
       isActive: true,
     });
 
@@ -243,6 +240,12 @@ const login = async (req, res) => {
       });
     }
 
+    // Ensure account has its permanent QR identifier
+    if (!user.qrCode) {
+      user.qrCode = await generateCustomerQrCode(User);
+      await user.save();
+    }
+
     let associatedCafe = null;
     if (["cafeOwner", "cafeManager", "cafeBarista", "admin"].includes(user.role)) {
       associatedCafe = await getAssociatedCafe(user);
@@ -273,8 +276,8 @@ const getMe = async (req, res) => {
   try {
     const user = req.user;
 
-    // Ensure customer accounts always have their permanent loyalty QR identifier
-    if (user.role === "user" && !user.qrCode) {
+    // Ensure every account always has a permanent unique QR identifier (backfill if missing)
+    if (!user.qrCode) {
       user.qrCode = await generateCustomerQrCode(User);
       await user.save();
     }
@@ -328,7 +331,7 @@ const getMe = async (req, res) => {
           redeemedRewards: user.redeemedRewards ?? 0,
           notificationsEnabled: user.notificationsEnabled ?? true,
           biometricsEnabled: user.biometricsEnabled ?? true,
-          ...(user.role === "user" && user.qrCode ? { qrCode: user.qrCode } : {}),
+          qrCode: user.qrCode || "",
           createdAt: user.createdAt,
           updatedAt: user.updatedAt,
         },
@@ -491,7 +494,7 @@ const updateProfile = async (req, res) => {
           notificationsEnabled: user.notificationsEnabled ?? true,
           biometricsEnabled: user.biometricsEnabled ?? true,
           isActive: user.isActive,
-          ...(user.role === "user" && user.qrCode ? { qrCode: user.qrCode } : {}),
+          qrCode: user.qrCode || "",
           createdAt: user.createdAt,
           updatedAt: user.updatedAt,
         },

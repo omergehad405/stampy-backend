@@ -127,6 +127,7 @@ async function startServer() {
 
     app.listen(PORT, () => {
       console.log(`[Stampy] Backend API Server running on http://localhost:${PORT}`);
+      console.log(`[Stampy] Frontend client expected at http://localhost:3000`);
     });
   } catch (error) {
     console.error("[Stampy Fatal Error]:", error);

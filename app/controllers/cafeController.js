@@ -1,7 +1,10 @@
 const mongoose = require("mongoose");
+const crypto = require("crypto");
 const Cafe = require("../models/Cafe");
 const Reward = require("../models/Reward");
 const User = require("../models/User");
+const Redemption = require("../models/Redemption");
+const Activity = require("../models/Activity");
 
 /**
  * Helper to resolve cafe for current authenticated user
@@ -143,6 +146,7 @@ const getCafeBySlug = async (req, res) => {
 
     return res.status(200).json({
       success: true,
+      type: "customer",
       data: {
         cafe: cafeObj,
       },
@@ -174,6 +178,7 @@ const getMyCafeProfile = async (req, res) => {
 
     return res.status(200).json({
       success: true,
+      type: "customer",
       data: {
         cafe: cafe.toJSON(),
       },
@@ -467,6 +472,21 @@ const joinCafe = async (req, res) => {
       cafe.customerCount = cafe.customers.length;
       cafe.totalStampsIssued = (cafe.totalStampsIssued || 0) + 1;
       await cafe.save();
+    }
+
+    try {
+      await Activity.create({
+        cafeId: cafe._id,
+        type: "join",
+        title: "New Member Enrolled",
+        customerName: user.name,
+        customerId: user._id,
+        stampsDelta: 0,
+        staffName: "System",
+        note: "Customer enrolled in cafe loyalty program",
+      });
+    } catch (actErr) {
+      console.warn("[joinCafe] Could not record activity:", actErr.message);
     }
 
     return res.status(200).json({
@@ -778,7 +798,79 @@ const scanCustomer = async (req, res) => {
       });
     }
 
-    // 2. Lookup customer in User model
+    // 2. Check if scanned code is a Reward Redemption QR Code
+    const redemption = await Redemption.findOne({
+      code: trimmedCode,
+      cafeId: staffCafe._id,
+    }).populate("customerId", "name email avatar phone createdAt");
+
+    if (redemption) {
+      const customer = redemption.customerId;
+      const isUsed = redemption.status === "used";
+      const isExpired =
+        redemption.expiresAt && new Date(redemption.expiresAt) < new Date();
+      const isValid = !isUsed && !isExpired && redemption.status === "pending";
+
+      return res.status(200).json({
+        success: true,
+        type: "reward",
+        data: {
+          redemption: {
+            id: redemption._id.toString(),
+            code: redemption.code,
+            rewardName: redemption.rewardName,
+            stampsSpent: redemption.stampsSpent,
+            status: redemption.status,
+            branch: redemption.branch,
+            createdAt: redemption.createdAt,
+            formattedDate: new Date(redemption.createdAt).toLocaleDateString("en-US", {
+              month: "short",
+              day: "numeric",
+              year: "numeric",
+              hour: "2-digit",
+              minute: "2-digit",
+            }),
+            expiresAt: redemption.expiresAt
+              ? new Date(redemption.expiresAt).toLocaleDateString("en-US", {
+                  month: "short",
+                  day: "numeric",
+                  year: "numeric",
+                })
+              : null,
+            usedAt: redemption.usedAt
+              ? new Date(redemption.usedAt).toLocaleDateString("en-US", {
+                  month: "short",
+                  day: "numeric",
+                  year: "numeric",
+                  hour: "2-digit",
+                  minute: "2-digit",
+                })
+              : null,
+            verifiedBy: redemption.verifiedBy,
+            isValid,
+            isUsed,
+            isExpired,
+          },
+          customer: customer
+            ? {
+                id: customer._id.toString(),
+                name: customer.name,
+                email: customer.email,
+                avatar: customer.avatar || "",
+                phone: customer.phone || "",
+              }
+            : {
+                name: redemption.customerName || "Customer",
+              },
+          cafe: {
+            id: staffCafe._id.toString(),
+            name: staffCafe.name,
+          },
+        },
+      });
+    }
+
+    // 3. Lookup customer in User model
     const searchConditions = [{ qrCode: trimmedCode }];
     if (mongoose.isValidObjectId(trimmedCode)) {
       searchConditions.push({ _id: trimmedCode });
@@ -838,6 +930,7 @@ const scanCustomer = async (req, res) => {
 
     return res.status(200).json({
       success: true,
+      type: "customer",
       data: {
         customer: {
           id: customer._id.toString(),
@@ -977,6 +1070,21 @@ const awardStamp = async (req, res) => {
 
     const unlockedReward = userMembership.stamps >= stampTarget;
 
+    try {
+      await Activity.create({
+        cafeId: staffCafe._id,
+        type: "stamp",
+        title: "Stamp Issued (+1)",
+        customerName: customer.name,
+        customerId: customer._id,
+        stampsDelta: count,
+        staffName: req.user?.name || "Barista",
+        note: note || "Visit verified via Barista QR Scan",
+      });
+    } catch (actErr) {
+      console.warn("[awardStamp] Could not record activity:", actErr.message);
+    }
+
     return res.status(200).json({
       success: true,
       message: `Successfully awarded +${count} stamp(s) to ${customer.name}!`,
@@ -1002,6 +1110,374 @@ const awardStamp = async (req, res) => {
   }
 };
 
+/**
+ * @desc    Customer redeems a reward for stamps
+ * @route   POST /api/cafes/:cafeId/redeem
+ * @access  Protected (Customer)
+ */
+const redeemReward = async (req, res) => {
+  try {
+    const { rewardId, cafeSlug, cafeId } = req.body;
+    const cafeIdentifier = cafeId || cafeSlug || req.params.cafeId;
+
+    if (!cafeIdentifier) {
+      return res.status(400).json({ success: false, message: "Cafe identifier is required." });
+    }
+    if (!rewardId) {
+      return res.status(400).json({ success: false, message: "Reward ID is required." });
+    }
+
+    // 1. Resolve cafe
+    const isObjectId = mongoose.Types.ObjectId.isValid(cafeIdentifier);
+    const cafe = await Cafe.findOne({
+      $or: [
+        ...(isObjectId ? [{ _id: cafeIdentifier }] : []),
+        { slug: cafeIdentifier.toLowerCase() },
+      ],
+      isActive: true,
+    });
+
+    if (!cafe) {
+      return res.status(404).json({ success: false, message: "Cafe not found." });
+    }
+
+    // 2. Resolve customer
+    const customer = await User.findById(req.user._id);
+    if (!customer) {
+      return res.status(404).json({ success: false, message: "Customer account not found." });
+    }
+
+    const cafeIdStr = cafe._id.toString();
+    const userMembership = (customer.cafes || []).find(
+      (c) => c.cafeId && c.cafeId.toString() === cafeIdStr
+    );
+
+    if (!userMembership) {
+      return res.status(403).json({
+        success: false,
+        message: "You must join this cafe's loyalty program before redeeming rewards.",
+      });
+    }
+
+    // 3. Look up reward in DB or cafe rewards
+    const isRewardObjectId = mongoose.Types.ObjectId.isValid(rewardId);
+    let reward = await Reward.findOne({
+      $or: [
+        ...(isRewardObjectId ? [{ _id: rewardId }] : []),
+        { title: rewardId },
+      ],
+      cafeId: cafe._id,
+      status: "active",
+    });
+
+    let requiredStamps = reward?.requiredStamps || reward?.stampsRequired;
+    let rewardTitle = reward?.title || reward?.name;
+
+    if (!reward) {
+      // Check cafe's embedded rewards if any
+      const embeddedReward = (cafe.rewards || []).find(
+        (r) => r.id === rewardId || r._id?.toString() === rewardId
+      );
+      if (embeddedReward) {
+        requiredStamps = embeddedReward.stampsRequired || embeddedReward.requiredStamps || 10;
+        rewardTitle = embeddedReward.name || embeddedReward.title || "Loyalty Reward";
+      }
+    }
+
+    if (!requiredStamps || !rewardTitle) {
+      return res.status(404).json({
+        success: false,
+        message: "Reward not found or is currently unavailable.",
+      });
+    }
+
+    if ((userMembership.stamps || 0) < requiredStamps) {
+      return res.status(400).json({
+        success: false,
+        message: `Insufficient stamps. You have ${userMembership.stamps || 0} stamps, but this reward requires ${requiredStamps}.`,
+      });
+    }
+
+    // 4. Generate unique single-use redemption code
+    const randomHex = crypto.randomBytes(3).toString("hex").toUpperCase();
+    const code = `STAMPY-RDM-${randomHex}`;
+
+    // 5. Deduct stamps
+    userMembership.stamps = userMembership.stamps - requiredStamps;
+    customer.totalStamps = Math.max(0, (customer.totalStamps || 0) - requiredStamps);
+    customer.redeemedRewards = (customer.redeemedRewards || 0) + 1;
+    await customer.save();
+
+    // 6. Create Redemption record
+    const redemption = await Redemption.create({
+      code,
+      cafeId: cafe._id,
+      customerId: customer._id,
+      customerName: customer.name,
+      rewardId: reward?._id || new mongoose.Types.ObjectId(),
+      rewardName: rewardTitle,
+      stampsSpent: requiredStamps,
+      status: "pending",
+      branch: `${cafe.name} • Main Counter`,
+      expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+    });
+
+    if (reward && reward.save) {
+      reward.redemptionsCount = (reward.redemptionsCount || 0) + 1;
+      await reward.save();
+    }
+
+    return res.status(201).json({
+      success: true,
+      message: `🎉 Successfully redeemed ${rewardTitle}! Show the QR code at the counter.`,
+      data: {
+        redemption: {
+          id: redemption._id.toString(),
+          code: redemption.code,
+          rewardId: reward?._id ? reward._id.toString() : rewardId,
+          rewardName: rewardTitle,
+          stampsSpent: requiredStamps,
+          status: redemption.status,
+          branch: redemption.branch,
+          expiresAt: new Date(redemption.expiresAt).toLocaleDateString("en-US", {
+            month: "short",
+            day: "numeric",
+            year: "numeric",
+          }),
+          createdAt: redemption.createdAt,
+          formattedDate: new Date(redemption.createdAt).toLocaleDateString("en-US", {
+            month: "short",
+            day: "numeric",
+            year: "numeric",
+          }),
+        },
+        remainingStamps: userMembership.stamps,
+      },
+    });
+  } catch (error) {
+    console.error("[Cafe Controller] redeemReward error:", error);
+    return res.status(500).json({
+      success: false,
+      message: error.message || "Failed to redeem reward.",
+    });
+  }
+};
+
+/**
+ * @desc    Get customer's redemptions for a cafe
+ * @route   GET /api/cafes/my/redemptions
+ * @access  Protected (Customer)
+ */
+const getMyRedemptions = async (req, res) => {
+  try {
+    const { cafeSlug, cafeId } = req.query;
+    const cafeIdentifier = cafeId || cafeSlug || req.params.cafeId;
+
+    let filter = { customerId: req.user._id };
+    if (cafeIdentifier) {
+      const isObjectId = mongoose.Types.ObjectId.isValid(cafeIdentifier);
+      const cafe = await Cafe.findOne({
+        $or: [
+          ...(isObjectId ? [{ _id: cafeIdentifier }] : []),
+          { slug: cafeIdentifier.toLowerCase() },
+        ],
+      });
+      if (cafe) {
+        filter.cafeId = cafe._id;
+      }
+    }
+
+    const redemptions = await Redemption.find(filter).sort({ createdAt: -1 });
+
+    const formatted = redemptions.map((r) => ({
+      id: r._id.toString(),
+      code: r.code,
+      rewardId: r.rewardId?.toString(),
+      rewardName: r.rewardName,
+      stampsSpent: r.stampsSpent,
+      status: r.status,
+      branch: r.branch,
+      expiresAt: r.expiresAt
+        ? new Date(r.expiresAt).toLocaleDateString("en-US", {
+            month: "short",
+            day: "numeric",
+            year: "numeric",
+          })
+        : null,
+      createdAt: r.createdAt,
+      formattedDate: new Date(r.createdAt).toLocaleDateString("en-US", {
+        month: "short",
+        day: "numeric",
+        year: "numeric",
+      }),
+      usedAt: r.usedAt
+        ? new Date(r.usedAt).toLocaleDateString("en-US", {
+            month: "short",
+            day: "numeric",
+            year: "numeric",
+            hour: "2-digit",
+            minute: "2-digit",
+          })
+        : null,
+      verifiedBy: r.verifiedBy,
+    }));
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        redemptions: formatted,
+      },
+    });
+  } catch (error) {
+    console.error("[Cafe Controller] getMyRedemptions error:", error);
+    return res.status(500).json({
+      success: false,
+      message: error.message || "Error fetching redemptions.",
+    });
+  }
+};
+
+/**
+ * @desc    Barista fulfills/confirms reward redemption
+ * @route   POST /api/dashboard/cafe/fulfill-redemption
+ * @access  Protected (Staff)
+ */
+const fulfillRewardRedemption = async (req, res) => {
+  try {
+    const { code } = req.body;
+    if (!code) {
+      return res.status(400).json({
+        success: false,
+        message: "Redemption code is required.",
+      });
+    }
+
+    const staffCafe = await resolveUserCafe(req.user, req.query.cafeId);
+    if (!staffCafe) {
+      return res.status(404).json({
+        success: false,
+        message: "No cafe associated with your staff account.",
+      });
+    }
+
+    const redemption = await Redemption.findOne({
+      code: code.trim(),
+      cafeId: staffCafe._id,
+    }).populate("customerId", "name email");
+
+    if (!redemption) {
+      return res.status(404).json({
+        success: false,
+        message: "Redemption record not found for this cafe.",
+      });
+    }
+
+    if (redemption.status === "used") {
+      return res.status(400).json({
+        success: false,
+        message: `This reward voucher was already fulfilled on ${
+          redemption.usedAt ? new Date(redemption.usedAt).toLocaleDateString() : "previously"
+        }.`,
+      });
+    }
+
+    const now = new Date();
+    redemption.status = "used";
+    redemption.usedAt = now;
+    redemption.verifiedBy = {
+      userId: req.user._id,
+      name: req.user.name,
+      role: req.user.role,
+    };
+    await redemption.save();
+
+    // Increment cafe totalRewardsRedeemed
+    staffCafe.totalRewardsRedeemed = (staffCafe.totalRewardsRedeemed || 0) + 1;
+    await staffCafe.save();
+
+    // Increment customer cafe membership rewardsRedeemedCount if user exists
+    if (redemption.customerId) {
+      const customer = await User.findById(redemption.customerId._id);
+      if (customer && Array.isArray(customer.cafes)) {
+        const mem = customer.cafes.find(
+          (c) => c.cafeId && c.cafeId.toString() === staffCafe._id.toString()
+        );
+        if (mem) {
+          mem.rewardsRedeemedCount = (mem.rewardsRedeemedCount || 0) + 1;
+          await customer.save();
+        }
+      }
+    }
+
+    // Log Activity to real collection
+    await Activity.create({
+      cafeId: staffCafe._id,
+      type: "redemption",
+      title: `Redeemed ${redemption.rewardName}`,
+      customerName: redemption.customerId?.name || redemption.customerName || "Customer",
+      customerId: redemption.customerId?._id,
+      stampsDelta: -redemption.stampsSpent,
+      staffName: req.user.name || "Barista",
+      note: `Verified reward code ${redemption.code}`,
+      metadata: {
+        redemptionId: redemption._id,
+        code: redemption.code,
+        rewardName: redemption.rewardName,
+      },
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: `🎉 Reward fulfilled! Verified ${redemption.rewardName} for ${
+        redemption.customerId?.name || "Customer"
+      }.`,
+      data: {
+        redemption,
+      },
+    });
+  } catch (error) {
+    console.error("[Cafe Controller] fulfillRewardRedemption error:", error);
+    return res.status(500).json({
+      success: false,
+      message: error.message || "Failed to fulfill reward redemption.",
+    });
+  }
+};
+
+/**
+ * @desc    Get real audit activity log for staff cafe
+ * @route   GET /api/dashboard/cafe/activities
+ * @access  Protected (Staff)
+ */
+const getCafeActivities = async (req, res) => {
+  try {
+    const staffCafe = await resolveUserCafe(req.user, req.query.cafeId);
+    if (!staffCafe) {
+      return res.status(404).json({
+        success: false,
+        message: "No cafe associated with staff account.",
+      });
+    }
+
+    const activities = await Activity.find({ cafeId: staffCafe._id })
+      .sort({ createdAt: -1 })
+      .limit(100);
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        activities: activities.map((a) => a.toJSON()),
+      },
+    });
+  } catch (error) {
+    console.error("[Cafe Controller] getCafeActivities error:", error);
+    return res.status(500).json({
+      success: false,
+      message: error.message || "Error fetching cafe activities.",
+    });
+  }
+};
+
 module.exports = {
   getPublicCafes,
   getCafeBySlug,
@@ -1014,4 +1490,8 @@ module.exports = {
   updateCafeCustomerStamps,
   scanCustomer,
   awardStamp,
+  redeemReward,
+  getMyRedemptions,
+  fulfillRewardRedemption,
+  getCafeActivities,
 };
