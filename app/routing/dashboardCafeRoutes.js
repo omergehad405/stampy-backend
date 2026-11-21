@@ -8,6 +8,10 @@ const {
   awardStamp,
   fulfillRewardRedemption,
   getCafeActivities,
+  getCafeStaff,
+  createCafeStaff,
+  updateCafeStaff,
+  deleteCafeStaff,
 } = require("../controllers/cafeController");
 const { protect, authorize } = require("../middlewares/authMiddleware");
 
@@ -24,5 +28,11 @@ router.post("/scan", scanCustomer);
 router.post("/award-stamp", awardStamp);
 router.post("/fulfill-redemption", fulfillRewardRedemption);
 router.get("/activities", getCafeActivities);
+
+// Staff management routes (restricted to cafe owner and admin)
+router.get("/staff", authorize("cafeOwner", "admin"), getCafeStaff);
+router.post("/staff", authorize("cafeOwner", "admin"), createCafeStaff);
+router.patch("/staff/:id", authorize("cafeOwner", "admin"), updateCafeStaff);
+router.delete("/staff/:id", authorize("cafeOwner", "admin"), deleteCafeStaff);
 
 module.exports = router;

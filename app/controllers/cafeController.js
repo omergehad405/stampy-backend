@@ -1478,6 +1478,264 @@ const getCafeActivities = async (req, res) => {
   }
 };
 
+/**
+ * @desc    Get all staff members of the current cafe
+ * @route   GET /api/dashboard/cafe/staff
+ * @access  Protected (cafeOwner, admin)
+ */
+const getCafeStaff = async (req, res) => {
+  try {
+    const staffCafe = await resolveUserCafe(req.user, req.query.cafeId);
+    if (!staffCafe) {
+      return res.status(404).json({
+        success: false,
+        message: "No cafe associated with your account.",
+      });
+    }
+
+    const staffList = await User.find({
+      $or: [
+        { cafeId: staffCafe._id },
+        { _id: staffCafe.ownerId },
+      ],
+      role: { $in: ["cafeOwner", "cafeManager", "cafeBarista"] },
+    }).sort({ createdAt: -1 });
+
+    const formatted = staffList.map((s) => ({
+      id: s._id.toString(),
+      name: s.name,
+      email: s.email,
+      phone: s.phone || "",
+      role: s.role,
+      roleKey: s.role === "cafeOwner" ? "owner" : s.role === "cafeManager" ? "manager" : "barista",
+      roleLabel:
+        s.role === "cafeOwner"
+          ? "Owner / Administrator"
+          : s.role === "cafeManager"
+          ? "Shift Manager"
+          : "Barista",
+      isActive: s.isActive ?? true,
+      avatar: s.avatar || "",
+      createdAt: s.createdAt,
+    }));
+
+    return res.status(200).json({
+      success: true,
+      data: formatted,
+    });
+  } catch (error) {
+    console.error("[Cafe Controller] getCafeStaff error:", error);
+    return res.status(500).json({
+      success: false,
+      message: error.message || "Failed to fetch cafe staff members.",
+    });
+  }
+};
+
+/**
+ * @desc    Create a new staff member for the current cafe
+ * @route   POST /api/dashboard/cafe/staff
+ * @access  Protected (cafeOwner, admin)
+ */
+const createCafeStaff = async (req, res) => {
+  try {
+    const staffCafe = await resolveUserCafe(req.user, req.query.cafeId);
+    if (!staffCafe) {
+      return res.status(404).json({
+        success: false,
+        message: "No cafe associated with your account.",
+      });
+    }
+
+    const { name, email, password, role, phone } = req.body;
+    if (!name || !email || !password) {
+      return res.status(400).json({
+        success: false,
+        message: "Name, email, and password are required.",
+      });
+    }
+
+    if (password.length < 8) {
+      return res.status(400).json({
+        success: false,
+        message: "Password must be at least 8 characters long.",
+      });
+    }
+
+    const normalizedEmail = email.trim().toLowerCase();
+    const existing = await User.findOne({ email: normalizedEmail });
+    if (existing) {
+      return res.status(409).json({
+        success: false,
+        message: "An account with this email address already exists.",
+      });
+    }
+
+    const validRole =
+      role === "cafeManager" || role === "manager" ? "cafeManager" : "cafeBarista";
+
+    const newStaff = await User.create({
+      name: name.trim(),
+      email: normalizedEmail,
+      password,
+      role: validRole,
+      phone: phone ? phone.trim() : "",
+      cafeId: staffCafe._id,
+      isActive: true,
+    });
+
+    return res.status(201).json({
+      success: true,
+      message: `Staff member ${newStaff.name} created successfully.`,
+      data: {
+        id: newStaff._id.toString(),
+        name: newStaff.name,
+        email: newStaff.email,
+        phone: newStaff.phone,
+        role: newStaff.role,
+        roleKey: newStaff.role === "cafeManager" ? "manager" : "barista",
+        roleLabel: newStaff.role === "cafeManager" ? "Shift Manager" : "Barista",
+        isActive: newStaff.isActive,
+        createdAt: newStaff.createdAt,
+      },
+    });
+  } catch (error) {
+    console.error("[Cafe Controller] createCafeStaff error:", error);
+    return res.status(500).json({
+      success: false,
+      message: error.message || "Failed to create staff member.",
+    });
+  }
+};
+
+/**
+ * @desc    Update a staff member
+ * @route   PATCH /api/dashboard/cafe/staff/:id
+ * @access  Protected (cafeOwner, admin)
+ */
+const updateCafeStaff = async (req, res) => {
+  try {
+    const staffCafe = await resolveUserCafe(req.user, req.query.cafeId);
+    if (!staffCafe) {
+      return res.status(404).json({
+        success: false,
+        message: "No cafe associated with your account.",
+      });
+    }
+
+    const { id } = req.params;
+    const { name, phone, role, isActive, password } = req.body;
+
+    const staff = await User.findOne({ _id: id, cafeId: staffCafe._id });
+    if (!staff) {
+      return res.status(404).json({
+        success: false,
+        message: "Staff member not found in your cafe.",
+      });
+    }
+
+    if (
+      staff.role === "cafeOwner" &&
+      req.user._id.toString() !== staff._id.toString() &&
+      req.user.role !== "admin"
+    ) {
+      return res.status(403).json({
+        success: false,
+        message: "Cannot modify the cafe owner account.",
+      });
+    }
+
+    if (name) staff.name = name.trim();
+    if (phone !== undefined) staff.phone = phone ? phone.trim() : "";
+    if (isActive !== undefined) staff.isActive = Boolean(isActive);
+    if (role && ["cafeManager", "cafeBarista"].includes(role)) {
+      staff.role = role;
+    }
+    if (password && password.length >= 8) {
+      staff.password = password;
+    }
+
+    await staff.save();
+
+    return res.status(200).json({
+      success: true,
+      message: "Staff member updated successfully.",
+      data: {
+        id: staff._id.toString(),
+        name: staff.name,
+        email: staff.email,
+        phone: staff.phone,
+        role: staff.role,
+        roleKey:
+          staff.role === "cafeOwner"
+            ? "owner"
+            : staff.role === "cafeManager"
+            ? "manager"
+            : "barista",
+        roleLabel:
+          staff.role === "cafeOwner"
+            ? "Owner / Administrator"
+            : staff.role === "cafeManager"
+            ? "Shift Manager"
+            : "Barista",
+        isActive: staff.isActive,
+        createdAt: staff.createdAt,
+      },
+    });
+  } catch (error) {
+    console.error("[Cafe Controller] updateCafeStaff error:", error);
+    return res.status(500).json({
+      success: false,
+      message: error.message || "Failed to update staff member.",
+    });
+  }
+};
+
+/**
+ * @desc    Delete a staff member
+ * @route   DELETE /api/dashboard/cafe/staff/:id
+ * @access  Protected (cafeOwner, admin)
+ */
+const deleteCafeStaff = async (req, res) => {
+  try {
+    const staffCafe = await resolveUserCafe(req.user, req.query.cafeId);
+    if (!staffCafe) {
+      return res.status(404).json({
+        success: false,
+        message: "No cafe associated with your account.",
+      });
+    }
+
+    const { id } = req.params;
+    const staff = await User.findOne({ _id: id, cafeId: staffCafe._id });
+    if (!staff) {
+      return res.status(404).json({
+        success: false,
+        message: "Staff member not found.",
+      });
+    }
+
+    if (staff.role === "cafeOwner") {
+      return res.status(400).json({
+        success: false,
+        message: "Cannot delete the cafe owner account.",
+      });
+    }
+
+    await User.deleteOne({ _id: id });
+    return res.status(200).json({
+      success: true,
+      message: "Staff member removed from cafe.",
+    });
+  } catch (error) {
+    console.error("[Cafe Controller] deleteCafeStaff error:", error);
+    return res.status(500).json({
+      success: false,
+      message: error.message || "Failed to delete staff member.",
+    });
+  }
+};
+
 module.exports = {
   getPublicCafes,
   getCafeBySlug,
@@ -1494,4 +1752,8 @@ module.exports = {
   getMyRedemptions,
   fulfillRewardRedemption,
   getCafeActivities,
+  getCafeStaff,
+  createCafeStaff,
+  updateCafeStaff,
+  deleteCafeStaff,
 };
