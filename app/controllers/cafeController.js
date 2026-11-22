@@ -595,23 +595,108 @@ const getMyMemberships = async (req, res) => {
       return res.status(404).json({ success: false, message: "User not found" });
     }
 
+    // Fetch customer's real activities and redemptions to attach full history to memberships
+    const [userActivities, userRedemptions] = await Promise.all([
+      Activity.find({ customerId: user._id }).sort({ createdAt: -1 }),
+      Redemption.find({ customerId: user._id }).sort({ createdAt: -1 }),
+    ]);
+
+    const activitiesByCafe = {};
+    (userActivities || []).forEach((a) => {
+      const cid = a.cafeId ? a.cafeId.toString() : "";
+      if (!cid) return;
+      if (!activitiesByCafe[cid]) activitiesByCafe[cid] = [];
+      activitiesByCafe[cid].push({
+        id: a._id.toString(),
+        type: a.type || "stamp",
+        title: a.title,
+        description: a.note || (a.type === "stamp" ? "Visit recorded via Barista QR Scan" : "Loyalty activity"),
+        stampsDelta: a.stampsDelta || 0,
+        staffName: a.staffName || "Staff",
+        date: a.createdAt
+          ? new Date(a.createdAt).toLocaleDateString("en-US", {
+              month: "short",
+              day: "numeric",
+              year: "numeric",
+              hour: "2-digit",
+              minute: "2-digit",
+            })
+          : "Recently",
+        createdAt: a.createdAt,
+      });
+    });
+
+    (userRedemptions || []).forEach((r) => {
+      const cid = r.cafeId ? r.cafeId.toString() : "";
+      if (!cid) return;
+      if (!activitiesByCafe[cid]) activitiesByCafe[cid] = [];
+      const alreadyLogged = activitiesByCafe[cid].some(
+        (act) => act.type === "redemption" && (act.id === r._id.toString() || (act.title && act.title.includes(r.rewardName)))
+      );
+      if (!alreadyLogged) {
+        activitiesByCafe[cid].push({
+          id: `rdm-${r._id.toString()}`,
+          type: "redemption",
+          title: `Redeemed ${r.rewardName}`,
+          description: `Reward Code: ${r.code} • Status: ${r.status}`,
+          stampsDelta: -r.stampsSpent,
+          staffName: "Self",
+          date: r.createdAt
+            ? new Date(r.createdAt).toLocaleDateString("en-US", {
+                month: "short",
+                day: "numeric",
+                year: "numeric",
+                hour: "2-digit",
+                minute: "2-digit",
+              })
+            : "Recently",
+          createdAt: r.createdAt,
+        });
+      }
+    });
+
     const memberships = (user.cafes || [])
       .filter((c) => c.cafeId) // Filter out deleted cafes
-      .map((c) => ({
-        cafeId: c.cafeId._id.toString(),
-        cafeSlug: c.cafeId.slug,
-        cafeName: c.cafeId.name,
-        cafeLogo: c.cafeId.logoImage,
-        cafeCover: c.cafeId.coverImage,
-        category: c.cafeId.category,
-        totalStamps: c.cafeId.stampTarget || 10,
-        stamps: c.stamps || 0,
-        totalVisits: c.totalVisits || 0,
-        lifetimeStamps: c.lifetimeStamps || 0,
-        rewardsRedeemedCount: c.rewardsRedeemedCount || 0,
-        joinedAt: c.joinedAt,
-        lastVisitDate: c.lastVisitDate,
-      }));
+      .map((c) => {
+        const cafeCid = c.cafeId._id.toString();
+        const cafeHistory = [...(activitiesByCafe[cafeCid] || [])];
+        if (c.joinedAt && !cafeHistory.some((act) => act.type === "join")) {
+          cafeHistory.push({
+            id: `act-joined-${cafeCid}`,
+            type: "join",
+            title: "Joined Loyalty Program",
+            description: `Welcome to ${c.cafeId.name}! Digital card activated.`,
+            stampsDelta: 0,
+            staffName: "System",
+            date: new Date(c.joinedAt).toLocaleDateString("en-US", {
+              month: "short",
+              day: "numeric",
+              year: "numeric",
+              hour: "2-digit",
+              minute: "2-digit",
+            }),
+            createdAt: c.joinedAt,
+          });
+        }
+        cafeHistory.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+
+        return {
+          cafeId: cafeCid,
+          cafeSlug: c.cafeId.slug,
+          cafeName: c.cafeId.name,
+          cafeLogo: c.cafeId.logoImage,
+          cafeCover: c.cafeId.coverImage,
+          category: c.cafeId.category,
+          totalStamps: c.cafeId.stampTarget || 10,
+          stamps: c.stamps || 0,
+          totalVisits: c.totalVisits || 0,
+          lifetimeStamps: c.lifetimeStamps || 0,
+          rewardsRedeemedCount: c.rewardsRedeemedCount || 0,
+          joinedAt: c.joinedAt,
+          lastVisitDate: c.lastVisitDate,
+          history: cafeHistory,
+        };
+      });
 
     return res.status(200).json({
       success: true,
@@ -1227,6 +1312,26 @@ const redeemReward = async (req, res) => {
       await reward.save();
     }
 
+    try {
+      await Activity.create({
+        cafeId: cafe._id,
+        type: "redemption",
+        title: `Redeemed ${rewardTitle}`,
+        customerName: customer.name,
+        customerId: customer._id,
+        stampsDelta: -requiredStamps,
+        staffName: "Self",
+        note: `Redeemed reward code ${code}`,
+        metadata: {
+          redemptionId: redemption._id,
+          code,
+          rewardName: rewardTitle,
+        },
+      });
+    } catch (actErr) {
+      console.warn("[redeemReward] Could not record activity:", actErr.message);
+    }
+
     return res.status(201).json({
       success: true,
       message: `🎉 Successfully redeemed ${rewardTitle}! Show the QR code at the counter.`,
@@ -1736,6 +1841,157 @@ const deleteCafeStaff = async (req, res) => {
   }
 };
 
+/**
+ * @desc    Get customer's activities (visits, stamps, redemptions) for a cafe
+ * @route   GET /api/cafes/:slugOrId/activities
+ * @access  Protected
+ */
+const getCustomerActivities = async (req, res) => {
+  try {
+    const { slugOrId } = req.params;
+    const userId = req.user._id;
+
+    // Resolve cafe by slug or ID
+    let cafe = null;
+    if (mongoose.Types.ObjectId.isValid(slugOrId)) {
+      cafe = await Cafe.findById(slugOrId);
+    }
+    if (!cafe) {
+      cafe = await Cafe.findOne({ slug: slugOrId });
+    }
+
+    if (!cafe) {
+      return res.status(404).json({
+        success: false,
+        message: `Cafe '${slugOrId}' not found.`,
+      });
+    }
+
+    // 1. Fetch activities from Activity collection for this customer and cafe
+    const activities = await Activity.find({
+      cafeId: cafe._id,
+      customerId: userId,
+    })
+      .sort({ createdAt: -1 })
+      .limit(50);
+
+    // 2. Fetch redemptions from Redemption collection
+    const redemptions = await Redemption.find({
+      cafeId: cafe._id,
+      customerId: userId,
+    })
+      .sort({ createdAt: -1 })
+      .limit(50);
+
+    // 3. Find customer's join date for this cafe
+    const user = await User.findById(userId);
+    const membership = (user?.cafes || []).find(
+      (c) => c.cafeId && c.cafeId.toString() === cafe._id.toString()
+    );
+
+    // 4. Combine and normalize
+    const activityMap = new Map();
+
+    activities.forEach((a) => {
+      activityMap.set(a._id.toString(), {
+        id: a._id.toString(),
+        type: a.type || "stamp",
+        title: a.title,
+        description:
+          a.note ||
+          (a.type === "stamp"
+            ? "Visit recorded via Barista QR Scan"
+            : "Loyalty activity"),
+        stampsDelta: a.stampsDelta || 0,
+        staffName: a.staffName || "Staff",
+        date: a.createdAt
+          ? new Date(a.createdAt).toLocaleDateString("en-US", {
+              month: "short",
+              day: "numeric",
+              year: "numeric",
+              hour: "2-digit",
+              minute: "2-digit",
+            })
+          : "Recently",
+        createdAt: a.createdAt,
+      });
+    });
+
+    // Merge redemptions (in case not logged in Activity)
+    redemptions.forEach((r) => {
+      const alreadyLogged = Array.from(activityMap.values()).some(
+        (act) =>
+          act.type === "redemption" &&
+          (act.id === r._id.toString() ||
+            (act.title && act.title.includes(r.rewardName)))
+      );
+      if (!alreadyLogged) {
+        activityMap.set(`rdm-${r._id.toString()}`, {
+          id: `rdm-${r._id.toString()}`,
+          type: "redemption",
+          title: `Redeemed ${r.rewardName}`,
+          description: `Reward Code: ${r.code} • Status: ${r.status}`,
+          stampsDelta: -r.stampsSpent,
+          staffName: "Self",
+          date: r.createdAt
+            ? new Date(r.createdAt).toLocaleDateString("en-US", {
+                month: "short",
+                day: "numeric",
+                year: "numeric",
+                hour: "2-digit",
+                minute: "2-digit",
+              })
+            : "Recently",
+          createdAt: r.createdAt,
+        });
+      }
+    });
+
+    // Add joined event if not present
+    if (membership?.joinedAt) {
+      const hasJoin = Array.from(activityMap.values()).some(
+        (act) => act.type === "join"
+      );
+      if (!hasJoin) {
+        activityMap.set(`join-${cafe._id.toString()}`, {
+          id: `join-${cafe._id.toString()}`,
+          type: "join",
+          title: "Joined Loyalty Program",
+          description: `Welcome to ${cafe.name}! Digital card activated.`,
+          stampsDelta: 0,
+          staffName: "System",
+          date: new Date(membership.joinedAt).toLocaleDateString("en-US", {
+            month: "short",
+            day: "numeric",
+            year: "numeric",
+            hour: "2-digit",
+            minute: "2-digit",
+          }),
+          createdAt: membership.joinedAt,
+        });
+      }
+    }
+
+    const combinedList = Array.from(activityMap.values()).sort(
+      (a, b) => new Date(b.createdAt) - new Date(a.createdAt)
+    );
+
+    return res.status(200).json({
+      success: true,
+      count: combinedList.length,
+      data: {
+        activities: combinedList,
+      },
+    });
+  } catch (error) {
+    console.error("[Cafe Controller] getCustomerActivities error:", error);
+    return res.status(500).json({
+      success: false,
+      message: error.message || "Server error fetching customer activities.",
+    });
+  }
+};
+
 module.exports = {
   getPublicCafes,
   getCafeBySlug,
@@ -1744,6 +2000,7 @@ module.exports = {
   joinCafe,
   leaveCafe,
   getMyMemberships,
+  getCustomerActivities,
   getCafeCustomers,
   updateCafeCustomerStamps,
   scanCustomer,

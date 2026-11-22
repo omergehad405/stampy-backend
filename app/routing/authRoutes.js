@@ -7,6 +7,8 @@ const {
   logout,
   updateProfile,
   getCustomerQrCode,
+  forgotPassword,
+  resetPassword,
 } = require("../controllers/authController");
 const { protect, authorize } = require("../middlewares/authMiddleware");
 
@@ -27,6 +29,8 @@ const authLimiter = rateLimit({
 // Public endpoints
 router.post("/register", authLimiter, register);
 router.post("/login", authLimiter, login);
+router.post("/forgot-password", authLimiter, forgotPassword);
+router.post("/reset-password", authLimiter, resetPassword);
 
 // Protected endpoints
 router.get("/me", protect, getMe);

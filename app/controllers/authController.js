@@ -1,7 +1,10 @@
 const crypto = require("crypto");
 const User = require("../models/User");
 const Cafe = require("../models/Cafe");
+const Activity = require("../models/Activity");
+const Redemption = require("../models/Redemption");
 const { sendTokenResponse, getCookieOptions } = require("../../utils/generateToken");
+const { sendPasswordResetEmail } = require("../../utils/sendEmail");
 
 const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -293,23 +296,108 @@ const getMe = async (req, res) => {
       select: "name slug tagline logoImage coverImage stampTarget status isActive category location rewards",
     });
 
+    // Fetch customer's real activities and redemptions to attach full history to joined cafes
+    const [userActivities, userRedemptions] = await Promise.all([
+      Activity.find({ customerId: user._id }).sort({ createdAt: -1 }),
+      Redemption.find({ customerId: user._id }).sort({ createdAt: -1 }),
+    ]);
+
+    const activitiesByCafe = {};
+    (userActivities || []).forEach((a) => {
+      const cid = a.cafeId ? a.cafeId.toString() : "";
+      if (!cid) return;
+      if (!activitiesByCafe[cid]) activitiesByCafe[cid] = [];
+      activitiesByCafe[cid].push({
+        id: a._id.toString(),
+        type: a.type || "stamp",
+        title: a.title,
+        description: a.note || (a.type === "stamp" ? "Visit recorded via Barista QR Scan" : "Loyalty activity"),
+        stampsDelta: a.stampsDelta || 0,
+        staffName: a.staffName || "Staff",
+        date: a.createdAt
+          ? new Date(a.createdAt).toLocaleDateString("en-US", {
+              month: "short",
+              day: "numeric",
+              year: "numeric",
+              hour: "2-digit",
+              minute: "2-digit",
+            })
+          : "Recently",
+        createdAt: a.createdAt,
+      });
+    });
+
+    (userRedemptions || []).forEach((r) => {
+      const cid = r.cafeId ? r.cafeId.toString() : "";
+      if (!cid) return;
+      if (!activitiesByCafe[cid]) activitiesByCafe[cid] = [];
+      const alreadyLogged = activitiesByCafe[cid].some(
+        (act) => act.type === "redemption" && (act.id === r._id.toString() || (act.title && act.title.includes(r.rewardName)))
+      );
+      if (!alreadyLogged) {
+        activitiesByCafe[cid].push({
+          id: `rdm-${r._id.toString()}`,
+          type: "redemption",
+          title: `Redeemed ${r.rewardName}`,
+          description: `Reward Code: ${r.code} • Status: ${r.status}`,
+          stampsDelta: -r.stampsSpent,
+          staffName: "Self",
+          date: r.createdAt
+            ? new Date(r.createdAt).toLocaleDateString("en-US", {
+                month: "short",
+                day: "numeric",
+                year: "numeric",
+                hour: "2-digit",
+                minute: "2-digit",
+              })
+            : "Recently",
+          createdAt: r.createdAt,
+        });
+      }
+    });
+
     const joinedCafesList = (populatedUser?.cafes || [])
       .filter((c) => c.cafeId)
-      .map((c) => ({
-        cafeId: c.cafeId._id.toString(),
-        slug: c.cafeId.slug,
-        name: c.cafeId.name,
-        logoImage: c.cafeId.logoImage,
-        coverImage: c.cafeId.coverImage,
-        category: c.cafeId.category,
-        totalStamps: c.cafeId.stampTarget || 10,
-        stamps: c.stamps || 0,
-        totalVisits: c.totalVisits || 0,
-        lifetimeStamps: c.lifetimeStamps || 0,
-        rewardsRedeemedCount: c.rewardsRedeemedCount || 0,
-        joinedAt: c.joinedAt,
-        lastVisitDate: c.lastVisitDate,
-      }));
+      .map((c) => {
+        const cafeCid = c.cafeId._id.toString();
+        const cafeHistory = [...(activitiesByCafe[cafeCid] || [])];
+        if (c.joinedAt && !cafeHistory.some((act) => act.type === "join")) {
+          cafeHistory.push({
+            id: `act-joined-${cafeCid}`,
+            type: "join",
+            title: "Joined Loyalty Program",
+            description: `Welcome to ${c.cafeId.name}! Digital card activated.`,
+            stampsDelta: 0,
+            staffName: "System",
+            date: new Date(c.joinedAt).toLocaleDateString("en-US", {
+              month: "short",
+              day: "numeric",
+              year: "numeric",
+              hour: "2-digit",
+              minute: "2-digit",
+            }),
+            createdAt: c.joinedAt,
+          });
+        }
+        cafeHistory.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+
+        return {
+          cafeId: cafeCid,
+          slug: c.cafeId.slug,
+          name: c.cafeId.name,
+          logoImage: c.cafeId.logoImage,
+          coverImage: c.cafeId.coverImage,
+          category: c.cafeId.category,
+          totalStamps: c.cafeId.stampTarget || 10,
+          stamps: c.stamps || 0,
+          totalVisits: c.totalVisits || 0,
+          lifetimeStamps: c.lifetimeStamps || 0,
+          rewardsRedeemedCount: c.rewardsRedeemedCount || 0,
+          joinedAt: c.joinedAt,
+          lastVisitDate: c.lastVisitDate,
+          history: cafeHistory,
+        };
+      });
 
     return res.status(200).json({
       success: true,
@@ -509,6 +597,141 @@ const updateProfile = async (req, res) => {
   }
 };
 
+/**
+ * @desc   Request password reset token and send email
+ * @route  POST /api/auth/forgot-password
+ * @access Public
+ */
+const forgotPassword = async (req, res) => {
+  try {
+    const { email } = req.body;
+
+    if (!email || !emailRegex.test(email.trim())) {
+      return res.status(400).json({
+        success: false,
+        message: "Please provide a valid email address.",
+      });
+    }
+
+    const normalizedEmail = email.trim().toLowerCase();
+    const user = await User.findOne({ email: normalizedEmail });
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: "No account found with this email address.",
+      });
+    }
+
+    // Generate reset token (valid for 15 minutes)
+    const resetToken = user.getResetPasswordToken();
+    await user.save({ validateBeforeSave: false });
+
+    // Determine client frontend URL
+    const clientOrigin =
+      req.headers.origin || process.env.FRONTEND_URL || "http://localhost:3000";
+    const resetUrl = `${clientOrigin}/reset-password?token=${resetToken}`;
+
+    try {
+      await sendPasswordResetEmail({
+        email: user.email,
+        name: user.name,
+        resetUrl,
+      });
+
+      return res.status(200).json({
+        success: true,
+        message: "A password reset link has been sent to your email. The link is valid for 15 minutes.",
+        expiresInMinutes: 15,
+      });
+    } catch (mailError) {
+      console.error("[Auth] Email delivery failure:", mailError);
+      user.resetPasswordToken = undefined;
+      user.resetPasswordExpire = undefined;
+      await user.save({ validateBeforeSave: false });
+
+      return res.status(500).json({
+        success: false,
+        message: "Email could not be sent. Please check mail settings and try again.",
+      });
+    }
+  } catch (error) {
+    console.error("[Auth] Forgot password error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Server error processing forgot password request.",
+    });
+  }
+};
+
+/**
+ * @desc   Reset user password using token
+ * @route  POST /api/auth/reset-password
+ * @access Public
+ */
+const resetPassword = async (req, res) => {
+  try {
+    const token = req.body.token || req.params.token || req.query.token;
+    const { password, confirmPassword } = req.body;
+
+    if (!token) {
+      return res.status(400).json({
+        success: false,
+        message: "Reset token is missing or invalid.",
+      });
+    }
+
+    if (!password || password.length < 8) {
+      return res.status(400).json({
+        success: false,
+        message: "Password must be at least 8 characters long.",
+      });
+    }
+
+    if (confirmPassword !== undefined && password !== confirmPassword) {
+      return res.status(400).json({
+        success: false,
+        message: "Password and password confirmation do not match.",
+      });
+    }
+
+    // Hash the plain token to match against the DB record
+    const resetPasswordToken = crypto
+      .createHash("sha256")
+      .update(token)
+      .digest("hex");
+
+    const user = await User.findOne({
+      resetPasswordToken,
+      resetPasswordExpire: { $gt: Date.now() },
+    });
+
+    if (!user) {
+      return res.status(400).json({
+        success: false,
+        message: "Password reset link is invalid or has expired (exceeded 15 minutes). Please request a new link.",
+      });
+    }
+
+    // Set new password
+    user.password = password;
+    user.resetPasswordToken = undefined;
+    user.resetPasswordExpire = undefined;
+    await user.save();
+
+    return res.status(200).json({
+      success: true,
+      message: "Your password has been successfully reset. You can now sign in with your new password.",
+    });
+  } catch (error) {
+    console.error("[Auth] Reset password error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Server error resetting password.",
+    });
+  }
+};
+
 module.exports = {
   register,
   login,
@@ -517,4 +740,6 @@ module.exports = {
   updateProfile,
   getCustomerQrCode,
   generateCustomerQrCode,
+  forgotPassword,
+  resetPassword,
 };

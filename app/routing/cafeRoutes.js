@@ -5,6 +5,7 @@ const {
   joinCafe,
   leaveCafe,
   getMyMemberships,
+  getCustomerActivities,
   redeemReward,
   getMyRedemptions,
 } = require("../controllers/cafeController");
@@ -19,6 +20,10 @@ router.get("/", getPublicCafes);
 router.get("/my/memberships", protect, getMyMemberships);
 router.get("/my/redemptions", protect, getMyRedemptions);
 router.post("/my/redeem", protect, redeemReward);
+
+// Customer activities for a specific cafe (visits, stamps, redemptions)
+router.get("/:slugOrId/activities", protect, getCustomerActivities);
+router.get("/:slugOrId/my-activities", protect, getCustomerActivities);
 
 // Public single cafe details
 router.get("/:slugOrId", getCafeBySlug);

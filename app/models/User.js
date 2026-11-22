@@ -1,5 +1,6 @@
 const mongoose = require("mongoose");
 const bcrypt = require("bcryptjs");
+const crypto = require("crypto");
 
 const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -133,12 +134,22 @@ const userSchema = new mongoose.Schema(
       type: Boolean,
       default: true,
     },
+    resetPasswordToken: {
+      type: String,
+      select: false,
+    },
+    resetPasswordExpire: {
+      type: Date,
+      select: false,
+    },
   },
   {
     timestamps: true,
     toJSON: {
       transform(doc, ret) {
         delete ret.password;
+        delete ret.resetPasswordToken;
+        delete ret.resetPasswordExpire;
         delete ret.__v;
         return ret;
       },
@@ -146,6 +157,8 @@ const userSchema = new mongoose.Schema(
     toObject: {
       transform(doc, ret) {
         delete ret.password;
+        delete ret.resetPasswordToken;
+        delete ret.resetPasswordExpire;
         delete ret.__v;
         return ret;
       },
@@ -168,6 +181,22 @@ userSchema.methods.matchPassword = async function (enteredPassword) {
     return false;
   }
   return await bcrypt.compare(enteredPassword, this.password);
+};
+
+// Generate and hash password reset token (valid for 15 minutes)
+userSchema.methods.getResetPasswordToken = function () {
+  const resetToken = crypto.randomBytes(32).toString("hex");
+
+  // Hash token and set to resetPasswordToken field
+  this.resetPasswordToken = crypto
+    .createHash("sha256")
+    .update(resetToken)
+    .digest("hex");
+
+  // Set expire to 15 minutes from now
+  this.resetPasswordExpire = Date.now() + 15 * 60 * 1000;
+
+  return resetToken;
 };
 
 const User = mongoose.models.User || mongoose.model("User", userSchema);
