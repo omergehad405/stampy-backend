@@ -145,10 +145,32 @@ const createCafe = async (req, res) => {
     const slug = await generateUniqueSlug(name);
     const chosenPlanId = subscriptionPlanId && subscriptionPlanId.trim() ? subscriptionPlanId.trim() : "plan-free";
 
+    let planObj = null;
+    if (mongoose.isValidObjectId(chosenPlanId)) {
+      planObj = await Plan.findById(chosenPlanId);
+    }
+    if (!planObj) {
+      const clean = chosenPlanId.replace(/^plan-/, "");
+      planObj = await Plan.findOne({ name: { $regex: new RegExp(`^${clean}$`, "i") } });
+    }
+
+    const now = new Date();
+    const expiry = new Date(now);
+    const period = planObj?.billingPeriod || "month";
+    if (period === "week") {
+      expiry.setDate(expiry.getDate() + 7);
+    } else if (period === "year") {
+      expiry.setFullYear(expiry.getFullYear() + 1);
+    } else {
+      expiry.setMonth(expiry.getMonth() + 1);
+    }
+
     const newCafe = await Cafe.create({
       name: name.trim(),
       slug,
       subscriptionPlanId: chosenPlanId,
+      subscriptionStart: now,
+      subscriptionExpiry: expiry,
       status: "active",
       isActive: true,
       owner: {
@@ -266,7 +288,32 @@ const updateCafe = async (req, res) => {
     if (name && name.trim()) cafe.name = name.trim();
     if (tagline !== undefined) cafe.tagline = tagline.trim();
     if (category !== undefined) cafe.category = category.trim();
-    if (subscriptionPlanId !== undefined) cafe.subscriptionPlanId = subscriptionPlanId.trim();
+    if (subscriptionPlanId !== undefined) {
+      const trimmedPlan = subscriptionPlanId.trim();
+      if (trimmedPlan !== cafe.subscriptionPlanId) {
+        cafe.subscriptionPlanId = trimmedPlan;
+        let pObj = null;
+        if (mongoose.isValidObjectId(trimmedPlan)) {
+          pObj = await Plan.findById(trimmedPlan);
+        }
+        if (!pObj) {
+          const clean = trimmedPlan.replace(/^plan-/, "");
+          pObj = await Plan.findOne({ name: { $regex: new RegExp(`^${clean}$`, "i") } });
+        }
+        const now = new Date();
+        cafe.subscriptionStart = now;
+        const expiry = new Date(now);
+        const period = pObj?.billingPeriod || "month";
+        if (period === "week") {
+          expiry.setDate(expiry.getDate() + 7);
+        } else if (period === "year") {
+          expiry.setFullYear(expiry.getFullYear() + 1);
+        } else {
+          expiry.setMonth(expiry.getMonth() + 1);
+        }
+        cafe.subscriptionExpiry = expiry;
+      }
+    }
 
     if (ownerName && ownerName.trim()) {
       cafe.owner.name = ownerName.trim();

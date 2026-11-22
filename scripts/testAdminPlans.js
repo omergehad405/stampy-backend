@@ -109,7 +109,9 @@ async function runTests() {
       price: 49,
       billingPeriod: "month",
       maxCustomers: 1000,
-      features: ["QR Stamp Card", "Up to 500 Customers", "Full Analytics", "Priority Support"],
+      maxRewards: 5,
+      maxStaff: 4,
+      features: ["digital_menu", "activity_history", "multi_staff"],
     }
   );
   console.log(
@@ -131,7 +133,8 @@ async function runTests() {
       },
       {
         price: 55,
-        features: ["QR Stamp Card", "Up to 500 Customers", "Full Analytics", "Priority Support", "Custom Branding"],
+        maxStaff: 5,
+        features: ["digital_menu", "activity_history", "multi_staff", "promotional_campaigns"],
       }
     );
     console.log(

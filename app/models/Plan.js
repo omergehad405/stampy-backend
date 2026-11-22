@@ -1,28 +1,19 @@
 const mongoose = require("mongoose");
 
 const AVAILABLE_FEATURES = [
-  "QR Stamp Card",
-  "Basic Analytics",
-  "Full Analytics",
-  "Advanced Analytics",
-  "1 Reward Tier",
-  "3 Reward Tiers",
-  "5 Reward Tiers",
-  "Unlimited Reward Tiers",
-  "Up to 50 Customers",
-  "Up to 250 Customers",
-  "Up to 500 Customers",
-  "Unlimited Customers",
-  "Email Support",
-  "Priority Support",
-  "24/7 Dedicated Support",
-  "Custom Branding",
+  "digital_menu",
+  "activity_history",
+  "multi_staff",
+  "promotional_campaigns",
+  "unlimited_customers",
+  "unlimited_rewards",
+  // Human-readable labels
+  "Digital Menu",
+  "Activity History Page",
   "Multi-staff Accounts",
-  "API Access",
-  "Custom Integrations",
-  "Push Notifications",
   "Promotional Campaigns",
-  "Automated Retention",
+  "Unlimited Customers",
+  "Unlimited Rewards",
 ];
 
 const planSchema = new mongoose.Schema(
@@ -48,25 +39,35 @@ const planSchema = new mongoose.Schema(
     },
     billingPeriod: {
       type: String,
-      enum: ["month", "year"],
+      enum: ["week", "month", "year"],
       default: "month",
     },
     features: {
-      type: [
-        {
-          type: String,
-          enum: {
-            values: AVAILABLE_FEATURES,
-            message: "{VALUE} is not a valid feature",
-          },
-        },
-      ],
+      type: [String],
       default: [],
     },
     maxCustomers: {
       type: Number,
-      default: null,
+      default: 50,
       min: [1, "Max customers must be at least 1 if set"],
+    },
+    maxRewards: {
+      type: Number,
+      default: 3,
+      min: [1, "Max rewards must be at least 1 if set"],
+    },
+    maxStaff: {
+      type: Number,
+      default: 1,
+      min: [1, "Max staff must be at least 1"],
+    },
+    isUnlimitedCustomers: {
+      type: Boolean,
+      default: false,
+    },
+    isUnlimitedRewards: {
+      type: Boolean,
+      default: false,
     },
     isActive: {
       type: Boolean,

@@ -1,5 +1,7 @@
 const Reward = require("../models/Reward");
 const Cafe = require("../models/Cafe");
+const { Plan } = require("../models/Plan");
+const mongoose = require("mongoose");
 
 /**
  * Normalize category string to match schema enum
@@ -134,6 +136,40 @@ const createReward = async (req, res) => {
         success: false,
         message: "Reward description is required.",
       });
+    }
+
+    // Enforce cafe plan maxRewards limit
+    const cafe = await Cafe.findById(cafeId);
+    if (cafe && cafe.subscriptionPlanId) {
+      let plan = null;
+      if (mongoose.isValidObjectId(cafe.subscriptionPlanId)) {
+        plan = await Plan.findById(cafe.subscriptionPlanId);
+      }
+      if (!plan) {
+        const planName = cafe.subscriptionPlanId.replace(/^plan-/, "");
+        plan = await Plan.findOne({
+          name: { $regex: new RegExp(`^${planName}$`, "i") },
+        });
+      }
+      if (plan) {
+        const isUnlimited =
+          Boolean(plan.isUnlimitedRewards) ||
+          plan.features?.includes("unlimited_rewards") ||
+          plan.features?.includes("Unlimited Rewards");
+
+        if (!isUnlimited && plan.maxRewards) {
+          const currentCount = await Reward.countDocuments({
+            cafeId,
+            status: "active",
+          });
+          if (currentCount >= plan.maxRewards) {
+            return res.status(403).json({
+              success: false,
+              message: `You have reached the maximum allowed limit of ${plan.maxRewards} active reward(s) on your '${plan.name}' plan. Please upgrade your subscription to add more rewards.`,
+            });
+          }
+        }
+      }
     }
 
     const reward = await Reward.create({

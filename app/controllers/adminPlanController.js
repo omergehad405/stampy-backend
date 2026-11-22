@@ -1,6 +1,61 @@
 const { Plan, AVAILABLE_FEATURES } = require("../models/Plan");
 const Cafe = require("../models/Cafe");
 
+const CANONICAL_FEATURES = [
+  "digital_menu",
+  "activity_history",
+  "multi_staff",
+  "promotional_campaigns",
+  "unlimited_customers",
+  "unlimited_rewards",
+];
+
+/**
+ * Feature mapping dictionary to normalize key or label
+ */
+const FEATURE_MAP = {
+  digital_menu: "digital_menu",
+  "digital menu": "digital_menu",
+  activity_history: "activity_history",
+  "activity history page": "activity_history",
+  "activity history": "activity_history",
+  multi_staff: "multi_staff",
+  "multi-staff accounts": "multi_staff",
+  "multi-staff": "multi_staff",
+  "multistaff": "multi_staff",
+  promotional_campaigns: "promotional_campaigns",
+  "promotional campaigns": "promotional_campaigns",
+  unlimited_customers: "unlimited_customers",
+  "unlimited customers": "unlimited_customers",
+  unlimited_rewards: "unlimited_rewards",
+  "unlimited rewards": "unlimited_rewards",
+  "unlimited reward tiers": "unlimited_rewards",
+};
+
+/**
+ * Known legacy feature names that should be safely ignored if present in old plans
+ */
+const LEGACY_IGNORED_FEATURES = [
+  "qr stamp card",
+  "basic analytics",
+  "full analytics",
+  "advanced analytics",
+  "1 reward tier",
+  "3 reward tiers",
+  "5 reward tiers",
+  "up to 50 customers",
+  "up to 250 customers",
+  "up to 500 customers",
+  "email support",
+  "priority support",
+  "24/7 dedicated support",
+  "custom branding",
+  "api access",
+  "custom integrations",
+  "push notifications",
+  "automated retention",
+];
+
 /**
  * Helper to normalize/validate features array against the enum
  */
@@ -9,22 +64,36 @@ const validateFeatures = (features) => {
     return { valid: false, message: "Features must be an array of strings." };
   }
 
-  // Find match in AVAILABLE_FEATURES (case-insensitive mapping for developer ease)
   const normalizedFeatures = [];
   for (const feat of features) {
     if (typeof feat !== "string" || !feat.trim()) continue;
-    const trimmed = feat.trim();
-    const matched = AVAILABLE_FEATURES.find(
-      (af) => af.toLowerCase() === trimmed.toLowerCase()
-    );
-    if (!matched) {
-      return {
-        valid: false,
-        message: `Feature '${trimmed}' is not allowed. Valid features are: ${AVAILABLE_FEATURES.join(", ")}`,
-      };
-    }
-    if (!normalizedFeatures.includes(matched)) {
-      normalizedFeatures.push(matched);
+    const trimmed = feat.trim().toLowerCase();
+    const mapped = FEATURE_MAP[trimmed];
+    if (mapped) {
+      if (!normalizedFeatures.includes(mapped)) {
+        normalizedFeatures.push(mapped);
+      }
+    } else if (LEGACY_IGNORED_FEATURES.includes(trimmed)) {
+      // Safely ignore obsolete legacy features from older database records
+      continue;
+    } else {
+      // Check if it matches any in AVAILABLE_FEATURES
+      const matched = AVAILABLE_FEATURES.find(
+        (af) => af.toLowerCase() === trimmed
+      );
+      if (matched) {
+        const canonicalMatch = FEATURE_MAP[matched.toLowerCase()];
+        if (canonicalMatch && !normalizedFeatures.includes(canonicalMatch)) {
+          normalizedFeatures.push(canonicalMatch);
+        } else if (!normalizedFeatures.includes(matched)) {
+          normalizedFeatures.push(matched);
+        }
+      } else {
+        return {
+          valid: false,
+          message: `Feature '${feat.trim()}' is not allowed. Valid features are: ${CANONICAL_FEATURES.join(", ")}`,
+        };
+      }
     }
   }
 
@@ -53,7 +122,7 @@ const getAllPlans = async (req, res) => {
       count: formattedPlans.length,
       data: {
         plans: formattedPlans,
-        availableFeatures: AVAILABLE_FEATURES,
+        availableFeatures: CANONICAL_FEATURES,
       },
     });
   } catch (error) {
@@ -74,7 +143,7 @@ const getAvailableFeatures = async (req, res) => {
   return res.status(200).json({
     success: true,
     data: {
-      features: AVAILABLE_FEATURES,
+      features: CANONICAL_FEATURES,
     },
   });
 };
@@ -129,6 +198,10 @@ const createPlan = async (req, res) => {
       billingPeriod = "month",
       features = [],
       maxCustomers,
+      maxRewards,
+      maxStaff,
+      isUnlimitedCustomers,
+      isUnlimitedRewards,
       isPopular = false,
       isActive = true,
     } = req.body;
@@ -175,14 +248,30 @@ const createPlan = async (req, res) => {
       });
     }
 
+    const hasUnlimitedCust =
+      Boolean(isUnlimitedCustomers) ||
+      featValidation.features.includes("unlimited_customers");
+    const hasUnlimitedRew =
+      Boolean(isUnlimitedRewards) ||
+      featValidation.features.includes("unlimited_rewards");
+    const hasMultiStaff = featValidation.features.includes("multi_staff");
+
     // 4. Create plan
     const newPlan = await Plan.create({
       name: name.trim(),
       description: description.trim(),
       price: Number(price),
-      billingPeriod: billingPeriod === "year" ? "year" : "month",
+      billingPeriod: ["week", "month", "year"].includes(billingPeriod) ? billingPeriod : "month",
       features: featValidation.features,
-      maxCustomers: maxCustomers ? Number(maxCustomers) : null,
+      isUnlimitedCustomers: hasUnlimitedCust,
+      maxCustomers: hasUnlimitedCust
+        ? null
+        : maxCustomers
+        ? Number(maxCustomers)
+        : 50,
+      isUnlimitedRewards: hasUnlimitedRew,
+      maxRewards: hasUnlimitedRew ? null : maxRewards ? Number(maxRewards) : 3,
+      maxStaff: hasMultiStaff ? (maxStaff ? Number(maxStaff) : 3) : 1,
       isPopular: Boolean(isPopular),
       isActive: Boolean(isActive),
     });
@@ -223,6 +312,10 @@ const updatePlan = async (req, res) => {
       billingPeriod,
       features,
       maxCustomers,
+      maxRewards,
+      maxStaff,
+      isUnlimitedCustomers,
+      isUnlimitedRewards,
       isPopular,
       isActive,
     } = req.body;
@@ -259,9 +352,10 @@ const updatePlan = async (req, res) => {
     }
 
     if (billingPeriod !== undefined) {
-      plan.billingPeriod = billingPeriod === "year" ? "year" : "month";
+      plan.billingPeriod = ["week", "month", "year"].includes(billingPeriod) ? billingPeriod : "month";
     }
 
+    let validatedFeatures = plan.features;
     if (features !== undefined) {
       const featValidation = validateFeatures(features);
       if (!featValidation.valid) {
@@ -270,11 +364,46 @@ const updatePlan = async (req, res) => {
           message: featValidation.message,
         });
       }
-      plan.features = featValidation.features;
+      validatedFeatures = featValidation.features;
+      plan.features = validatedFeatures;
     }
 
-    if (maxCustomers !== undefined) {
-      plan.maxCustomers = maxCustomers ? Number(maxCustomers) : null;
+    const hasUnlimitedCust =
+      features !== undefined
+        ? validatedFeatures.includes("unlimited_customers")
+        : isUnlimitedCustomers !== undefined
+        ? Boolean(isUnlimitedCustomers)
+        : plan.features.includes("unlimited_customers");
+    plan.isUnlimitedCustomers = hasUnlimitedCust;
+
+    if (hasUnlimitedCust) {
+      plan.maxCustomers = null;
+    } else if (maxCustomers !== undefined && maxCustomers !== null && maxCustomers !== "") {
+      const parsedCust = Number(maxCustomers);
+      plan.maxCustomers = !isNaN(parsedCust) && parsedCust >= 1 ? parsedCust : (plan.maxCustomers || 50);
+    }
+
+    const hasUnlimitedRew =
+      features !== undefined
+        ? validatedFeatures.includes("unlimited_rewards")
+        : isUnlimitedRewards !== undefined
+        ? Boolean(isUnlimitedRewards)
+        : plan.features.includes("unlimited_rewards");
+    plan.isUnlimitedRewards = hasUnlimitedRew;
+
+    if (hasUnlimitedRew) {
+      plan.maxRewards = null;
+    } else if (maxRewards !== undefined && maxRewards !== null && maxRewards !== "") {
+      const parsedRew = Number(maxRewards);
+      plan.maxRewards = !isNaN(parsedRew) && parsedRew >= 1 ? parsedRew : (plan.maxRewards || 3);
+    }
+
+    if (plan.features.includes("multi_staff")) {
+      if (maxStaff !== undefined) {
+        plan.maxStaff = maxStaff ? Number(maxStaff) : 3;
+      }
+    } else {
+      plan.maxStaff = 1;
     }
 
     if (isPopular !== undefined) {
@@ -383,9 +512,20 @@ const assignPlanToCafe = async (req, res) => {
     }
 
     // Update Cafe subscription attributes
+    const now = new Date();
     cafe.subscriptionPlanId = plan._id.toString();
     cafe.subscriptionStatus = "active";
-    cafe.subscriptionStart = new Date();
+    cafe.subscriptionStart = now;
+
+    const expiry = new Date(now);
+    if (plan.billingPeriod === "week") {
+      expiry.setDate(expiry.getDate() + 7);
+    } else if (plan.billingPeriod === "year") {
+      expiry.setFullYear(expiry.getFullYear() + 1);
+    } else {
+      expiry.setMonth(expiry.getMonth() + 1);
+    }
+    cafe.subscriptionExpiry = expiry;
     await cafe.save();
 
     const cafeObj = cafe.toJSON();

@@ -5,6 +5,7 @@ const Reward = require("../models/Reward");
 const User = require("../models/User");
 const Redemption = require("../models/Redemption");
 const Activity = require("../models/Activity");
+const { Plan } = require("../models/Plan");
 
 /**
  * Helper to resolve cafe for current authenticated user
@@ -46,6 +47,45 @@ const resolveUserCafe = async (user, queryCafeId) => {
 };
 
 /**
+ * Helper to check whether a cafe's subscription period has ended
+ */
+const isCafeSubscriptionExpired = async (cafe) => {
+  if (!cafe) return false;
+  if (cafe.subscriptionStatus === "past_due" || cafe.subscriptionStatus === "cancelled") {
+    return true;
+  }
+
+  let expiryDate = cafe.subscriptionExpiry ? new Date(cafe.subscriptionExpiry) : null;
+  if (!expiryDate || isNaN(expiryDate.getTime())) {
+    let plan = null;
+    if (cafe.subscriptionPlanId) {
+      if (mongoose.isValidObjectId(cafe.subscriptionPlanId)) {
+        plan = await Plan.findById(cafe.subscriptionPlanId);
+      }
+      if (!plan) {
+        const cleanName = cafe.subscriptionPlanId.replace(/^plan-/, "");
+        plan = await Plan.findOne({
+          name: { $regex: new RegExp(`^${cleanName}$`, "i") },
+        });
+      }
+    }
+    const startDate = cafe.subscriptionStart || cafe.createdAt || new Date();
+    const period = plan?.billingPeriod || "month";
+    const exp = new Date(startDate);
+    if (period === "week") {
+      exp.setDate(exp.getDate() + 7);
+    } else if (period === "year") {
+      exp.setFullYear(exp.getFullYear() + 1);
+    } else {
+      exp.setMonth(exp.getMonth() + 1);
+    }
+    expiryDate = exp;
+  }
+
+  return new Date() > expiryDate;
+};
+
+/**
  * @desc    Get all public active cafes
  * @route   GET /api/cafes
  * @access  Public
@@ -76,14 +116,37 @@ const getPublicCafes = async (req, res) => {
       });
     });
 
+    // Fetch active promotional plans to tag cafes eligible for promotional campaigns
+    const promoPlans = await Plan.find({
+      isActive: true,
+      features: {
+        $in: [
+          "promotional_campaigns",
+          "Promotional Campaigns",
+          "promotional",
+        ],
+      },
+    }).select("_id name features");
+
+    const promoPlanIds = new Set(promoPlans.map((p) => p._id.toString()));
+    const promoPlanNames = new Set(promoPlans.map((p) => p.name.toLowerCase()));
+
     const formattedCafes = cafes.map((c) => {
       const obj = c.toJSON();
       const rewards = rewardsByCafe[c._id.toString()] || [];
+      const planIdStr = c.subscriptionPlanId ? c.subscriptionPlanId.toString() : "";
+      const planNameStr = planIdStr.replace(/^plan-/, "").toLowerCase();
+      const hasPromo =
+        promoPlanIds.has(planIdStr) ||
+        promoPlanNames.has(planNameStr) ||
+        promoPlanNames.has(planIdStr.toLowerCase());
+
       return {
         ...obj,
         id: obj._id ? obj._id.toString() : obj.id,
         rewards,
         rewardsCount: rewards.length,
+        hasPromotionalCampaigns: Boolean(hasPromo),
       };
     });
 
@@ -176,11 +239,55 @@ const getMyCafeProfile = async (req, res) => {
       });
     }
 
+    let currentPlan = null;
+    if (cafe.subscriptionPlanId) {
+      if (mongoose.isValidObjectId(cafe.subscriptionPlanId)) {
+        currentPlan = await Plan.findById(cafe.subscriptionPlanId);
+      }
+      if (!currentPlan) {
+        const cleanName = cafe.subscriptionPlanId.replace(/^plan-/, "");
+        currentPlan = await Plan.findOne({
+          name: { $regex: new RegExp(`^${cleanName}$`, "i") },
+        });
+      }
+    }
+
+    if (!currentPlan) {
+      currentPlan = (await Plan.findOne({ price: 0 })) || (await Plan.findOne());
+    }
+
+    const cafeObj = cafe.toJSON();
+    if (currentPlan) {
+      const planJson = currentPlan.toJSON();
+      cafeObj.currentPlan = {
+        ...planJson,
+        id: currentPlan._id.toString(),
+      };
+    }
+
+    // Calculate effective subscription expiry based on joining/start date and billingPeriod
+    let effectiveExpiry = cafe.subscriptionExpiry ? new Date(cafe.subscriptionExpiry) : null;
+    if (!effectiveExpiry || isNaN(effectiveExpiry.getTime())) {
+      const startDate = cafe.subscriptionStart || cafe.createdAt || new Date();
+      const period = currentPlan?.billingPeriod || "month";
+      let cycleEnd = new Date(startDate);
+      if (period === "week") {
+        cycleEnd.setDate(cycleEnd.getDate() + 7);
+      } else if (period === "year") {
+        cycleEnd.setFullYear(cycleEnd.getFullYear() + 1);
+      } else {
+        cycleEnd.setMonth(cycleEnd.getMonth() + 1);
+      }
+      effectiveExpiry = cycleEnd;
+    }
+    cafeObj.subscriptionExpiry = effectiveExpiry;
+    cafeObj.joiningDate = cafe.createdAt;
+
     return res.status(200).json({
       success: true,
       type: "customer",
       data: {
-        cafe: cafe.toJSON(),
+        cafe: cafeObj,
       },
     });
   } catch (error) {
@@ -799,6 +906,14 @@ const updateCafeCustomerStamps = async (req, res) => {
       return res.status(404).json({ success: false, message: "Cafe not found." });
     }
 
+    if (await isCafeSubscriptionExpired(cafe)) {
+      return res.status(403).json({
+        success: false,
+        code: "SUBSCRIPTION_EXPIRED",
+        message: "Your subscription period has ended. Adjusting customer stamps is suspended until your plan is renewed or upgraded.",
+      });
+    }
+
     const { customerId } = req.params;
     const { stamps, lifetimeStamps, reason } = req.body;
 
@@ -880,6 +995,22 @@ const scanCustomer = async (req, res) => {
       return res.status(404).json({
         success: false,
         message: "No cafe associated with your staff account.",
+      });
+    }
+
+    if (await isCafeSubscriptionExpired(staffCafe)) {
+      return res.status(403).json({
+        success: false,
+        code: "SUBSCRIPTION_EXPIRED",
+        message: "Your subscription period has ended. Fulfilling reward redemptions is suspended until your plan is renewed or upgraded.",
+      });
+    }
+
+    if (await isCafeSubscriptionExpired(staffCafe)) {
+      return res.status(403).json({
+        success: false,
+        code: "SUBSCRIPTION_EXPIRED",
+        message: "Your subscription period has ended. Scanning customer QR codes is suspended until your plan is renewed or upgraded.",
       });
     }
 
@@ -1074,6 +1205,22 @@ const awardStamp = async (req, res) => {
       return res.status(404).json({
         success: false,
         message: "No cafe associated with your staff account.",
+      });
+    }
+
+    if (await isCafeSubscriptionExpired(staffCafe)) {
+      return res.status(403).json({
+        success: false,
+        code: "SUBSCRIPTION_EXPIRED",
+        message: "Your subscription period has ended. Fulfilling reward redemptions is suspended until your plan is renewed or upgraded.",
+      });
+    }
+
+    if (await isCafeSubscriptionExpired(staffCafe)) {
+      return res.status(403).json({
+        success: false,
+        code: "SUBSCRIPTION_EXPIRED",
+        message: "Your subscription period has ended. Scanning customer QR codes is suspended until your plan is renewed or upgraded.",
       });
     }
 
@@ -1462,6 +1609,14 @@ const fulfillRewardRedemption = async (req, res) => {
       return res.status(404).json({
         success: false,
         message: "No cafe associated with your staff account.",
+      });
+    }
+
+    if (await isCafeSubscriptionExpired(staffCafe)) {
+      return res.status(403).json({
+        success: false,
+        code: "SUBSCRIPTION_EXPIRED",
+        message: "Your subscription period has ended. Fulfilling reward redemptions is suspended until your plan is renewed or upgraded.",
       });
     }
 
